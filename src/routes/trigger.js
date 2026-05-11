@@ -6,29 +6,10 @@
  */
 
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const multer = require('multer');
 const { env, BRAND, toZernioPlatforms } = require('../config');
 const zernio = require('../services/zernio');
 const logger = require('../utils/logger');
 const storage = require('../utils/storage');
-
-// Configure multer for image uploads
-const uploadDir = path.resolve(env.dataDir, 'images');
-fs.mkdirSync(uploadDir, { recursive: true });
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname) || '.png';
-      const name = `post-${req.params.postNumber || 'unknown'}-${Date.now()}${ext}`;
-      cb(null, name);
-    }
-  }),
-  limits: { fileSize: 20 * 1024 * 1024 }
-});
 
 function makeRouter({ telegram, calendar }) {
   const router = express.Router();
@@ -67,6 +48,7 @@ function makeRouter({ telegram, calendar }) {
 
   // Restore calendar data without re-running /generate.
   // Body: { monthKey, posts[], blogs[] }
+  // Posts can include image_url directly (public URL) to skip upload step.
   router.post('/seed-calendar', async (req, res) => {
     try {
       const { monthKey, posts = [], blogs = [] } = req.body;
@@ -98,42 +80,6 @@ function makeRouter({ telegram, calendar }) {
       res.json({ ok: true, calendarId, postsInserted, blogsInserted });
     } catch (err) {
       logger.error({ err: err.message }, 'seed-calendar failed');
-      res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  // Upload an image for a specific post number.
-  // POST /upload-image/:postNumber  (multipart, field name: "image")
-  router.post('/upload-image/:postNumber', upload.single('image'), async (req, res) => {
-    try {
-      const postNumber = parseInt(req.params.postNumber, 10);
-      const monthKey = storage.getSetting('last_calendar_month');
-      if (!monthKey) {
-        return res.status(400).json({ ok: false, error: 'No active calendar' });
-      }
-
-      const post = storage.getPostByNumber(monthKey, postNumber);
-      if (!post) {
-        return res.status(404).json({ ok: false, error: `Post ${postNumber} not found` });
-      }
-
-      if (!req.file) {
-        return res.status(400).json({ ok: false, error: 'No image file provided' });
-      }
-
-      const imageFilename = req.file.filename;
-      const imagePath = req.file.path;
-      const imageUrl = `${env.publicBaseUrl}/images/${imageFilename}`;
-
-      storage.updatePost(post.id, {
-        image_path: imagePath,
-        image_url: imageUrl,
-        status: 'image_attached'
-      });
-
-      res.json({ ok: true, postNumber, imageUrl, filename: imageFilename });
-    } catch (err) {
-      logger.error({ err: err.message }, 'upload-image failed');
       res.status(500).json({ ok: false, error: err.message });
     }
   });
