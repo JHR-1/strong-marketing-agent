@@ -25,6 +25,7 @@
  */
 
 const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws');
 const { env } = require('../config');
 const logger = require('./logger');
 
@@ -38,7 +39,8 @@ function getClient() {
     );
   }
   client = createClient(env.supabaseUrl, env.supabaseServiceKey, {
-    auth: { persistSession: false, autoRefreshToken: false }
+    auth: { persistSession: false, autoRefreshToken: false },
+    realtime: { transport: WebSocket }
   });
   logger.info({ url: env.supabaseUrl }, 'Supabase client initialised');
   return client;
