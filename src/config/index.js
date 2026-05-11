@@ -1,8 +1,9 @@
 require('dotenv').config();
 
-const BRAND = require('./brand');
+const companies = require('./companies');
+const BRAND = require('./brand'); // legacy default-company brand
 const PLATFORMS = require('./platforms');
-const PROMPTS = require('./prompts');
+const PROMPTS = require('./prompts'); // legacy default-company prompts
 
 const env = {
   port: parseInt(process.env.PORT || '3000', 10),
@@ -16,6 +17,9 @@ const env = {
 
   zernioApiKey: process.env.ZERNIO_API_KEY,
   zernioBaseUrl: process.env.ZERNIO_BASE_URL || 'https://zernio.com/api/v1',
+  // Legacy single-company Zernio profile id. Kept so any code path
+  // that hasn't been migrated yet still has a value, but per-company
+  // profile ids are the source of truth now.
   zernioProfileId: process.env.ZERNIO_PROFILE_ID || '69c00b0b467c216082612e75',
 
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -35,12 +39,23 @@ const env = {
   supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY || '',
 
   publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://localhost:3000',
-  triggerSecret: process.env.TRIGGER_SECRET || ''
+  triggerSecret: process.env.TRIGGER_SECRET || '',
+
+  defaultCompanySlug: companies.DEFAULT_COMPANY_SLUG
 };
 
 module.exports = {
+  // Legacy single-company aliases (resolve to the DEFAULT company so
+  // existing imports keep working).
   BRAND,
   ...PLATFORMS,
   PROMPTS,
-  env
+  env,
+
+  // Multi-company registry.
+  companies,
+  getCompany: companies.getCompany,
+  getCompanyOrThrow: companies.getCompanyOrThrow,
+  getDefaultCompany: companies.getDefaultCompany,
+  listCompanies: companies.listCompanies
 };

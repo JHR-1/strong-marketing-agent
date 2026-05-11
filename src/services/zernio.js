@@ -1,18 +1,14 @@
 /**
- * Zernio service
- * --------------
- * Thin wrapper around Zernio's REST API.
- *  - listAccounts()
- *  - listProfiles()
- *  - schedulePost({ caption, scheduledForIso, platforms[], imageUrl, ... })
+ * Zernio service — multi-company aware.
  *
- * The platform/account-id mapping lives in config/platforms.js so it
- * is rotatable via environment variables.
+ * Schedules posts via Zernio's REST API. Each company has its own
+ * Zernio profile id and its own set of channel account ids; the
+ * caller passes the company config in so the service knows which
+ * profile + accounts to talk to.
  *
- * The POST /posts body format matches the working Python reference
- * (schedule-zernio.py) exactly:
+ * POST /posts body format (unchanged from the working Python reference):
  *   {
- *     profileKey:          PROFILE_ID,
+ *     profileKey:          <company.zernio.profileId>,
  *     content:             "<caption + hashtags>",
  *     platforms:           [{ platform, accountId, profileId, [customContent] }, ...],
  *     scheduledFor:        "<UTC ISO 8601 with .000Z>",
@@ -26,7 +22,12 @@
 
 const axios = require('axios');
 
-const { env, toZernioPlatforms, PROFILE_ID } = require('../config');
+const {
+  env,
+  toZernioPlatformsForCompany,
+  getDefaultCompany,
+  getCompany
+} = require('../config');
 const logger = require('../utils/logger');
 
 const http = axios.create({
@@ -50,17 +51,12 @@ async function listProfiles() {
 
 /**
  * Normalise a scheduled-for timestamp to the exact format Zernio expects
- * (UTC, ISO 8601, millisecond precision, trailing Z), matching the
- * Python reference script.
- *
- * @param {string} iso  any parseable ISO 8601 timestamp
- * @returns {string}    e.g. "2026-06-01T08:00:00.000Z"
+ * (UTC, ISO 8601, millisecond precision, trailing Z).
  */
 function normaliseScheduledFor(iso) {
   if (!iso) return iso;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  // Convert to UTC with millisecond precision: 2026-06-01T08:00:00.000Z
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   return (
     `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
@@ -69,16 +65,6 @@ function normaliseScheduledFor(iso) {
   );
 }
 
-/**
- * Split a full caption (body + hashtags joined with \n\n) back into the
- * body portion (used to build a Twitter-safe customContent) and the
- * hashtag list. Falls back gracefully if the caption was assembled
- * differently.
- *
- * @param {string}   caption     - the full caption text actually sent as `content`
- * @param {string[]} [hashtags]  - the hashtag list straight from the post record
- * @returns {{ body: string, hashtags: string[] }}
- */
 function splitCaptionForTwitter(caption, hashtags) {
   if (Array.isArray(hashtags) && hashtags.length) {
     const joined = hashtags.join(' ');
@@ -88,9 +74,6 @@ function splitCaptionForTwitter(caption, hashtags) {
     }
     return { body: caption || '', hashtags };
   }
-  // No structured hashtag list available — fall back to a regex split on
-  // the first hashtag occurrence so we still produce a sensible Twitter
-  // variant.
   if (typeof caption === 'string') {
     const m = caption.match(/(^|\n)#\w/);
     if (m && m.index !== undefined) {
@@ -105,17 +88,29 @@ function splitCaptionForTwitter(caption, hashtags) {
 }
 
 /**
+ * Resolve `args.company` into a real company config. Accepts a company
+ * object, a slug string, or null/undefined (falls back to the default
+ * company so legacy callers keep working).
+ */
+function resolveCompany(arg) {
+  if (!arg) return getDefaultCompany();
+  if (typeof arg === 'string') return getCompany(arg) || getDefaultCompany();
+  if (arg && arg.platforms && arg.zernio?.profileId) return arg;
+  return getDefaultCompany();
+}
+
+/**
  * Schedule a post.
  *
  * @param {object} args
- * @param {string} args.caption          - publish-ready text (body + hashtags) used as `content`
- * @param {string} args.scheduledForIso  - ISO 8601 timestamp (UTC ok)
- * @param {string[]} args.platforms      - internal platform keys
- *                                         (e.g. ['linkedin','facebook','instagram','twitter','google'])
- * @param {string} [args.imageUrl]       - public URL of the image to attach
- * @param {string[]} [args.hashtags]     - structured hashtag list (used to build Twitter customContent)
- * @param {string} [args.timezone='Europe/London']
- * @param {boolean} [args.publishNow=false]
+ * @param {string}        args.caption          - publish-ready text (body + hashtags) used as `content`
+ * @param {string}        args.scheduledForIso  - ISO 8601 timestamp (UTC ok)
+ * @param {string[]}      args.platforms        - internal platform keys
+ * @param {string}        [args.imageUrl]
+ * @param {string[]}      [args.hashtags]
+ * @param {string}        [args.timezone='Europe/London']
+ * @param {boolean}       [args.publishNow=false]
+ * @param {object|string} [args.company]        - company config OR slug. Defaults to the default company.
  */
 async function schedulePost({
   caption,
@@ -124,25 +119,30 @@ async function schedulePost({
   imageUrl,
   hashtags,
   timezone = 'Europe/London',
-  publishNow = false
+  publishNow = false,
+  company
 }) {
-  // Reconstruct body / hashtag list so we can build a Twitter-safe
-  // customContent that mirrors the Python reference script.
+  const companyCfg = resolveCompany(company);
+
   const { body: twitterBody, hashtags: twitterTags } = splitCaptionForTwitter(
     caption,
     hashtags
   );
 
-  const platformObjects = toZernioPlatforms(platforms, logger, {
-    captionBody: twitterBody,
-    hashtags: twitterTags
-  });
+  const platformObjects = toZernioPlatformsForCompany(
+    platforms,
+    companyCfg,
+    logger,
+    { captionBody: twitterBody, hashtags: twitterTags }
+  );
   if (!platformObjects.length) {
-    throw new Error('Cannot schedule post: no valid platforms resolved');
+    throw new Error(
+      `[${companyCfg.slug}] Cannot schedule post: no valid platforms resolved (check ZERNIO_${companyCfg.slug.toUpperCase()}_ACCOUNT_* env vars)`
+    );
   }
 
   const body = {
-    profileKey: PROFILE_ID,
+    profileKey: companyCfg.zernio.profileId,
     content: caption,
     platforms: platformObjects,
     timezone,
@@ -163,6 +163,7 @@ async function schedulePost({
 
   logger.info(
     {
+      company: companyCfg.slug,
       scheduledFor: body.scheduledFor,
       platforms: platformObjects.map((p) => p.platform),
       hasImage: !!imageUrl
@@ -173,14 +174,20 @@ async function schedulePost({
   try {
     const { data } = await http.post('/posts', body);
     logger.info(
-      { zernioId: data?.id || data?.postId || data?.data?.id },
+      {
+        company: companyCfg.slug,
+        zernioId: data?.id || data?.postId || data?.data?.id
+      },
       'Zernio scheduled'
     );
     return data;
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data;
-    logger.error({ status, detail }, 'Zernio scheduling failed');
+    logger.error(
+      { company: companyCfg.slug, status, detail },
+      'Zernio scheduling failed'
+    );
     throw new Error(
       `Zernio API error ${status || ''}: ${
         typeof detail === 'string' ? detail : JSON.stringify(detail)
@@ -206,7 +213,6 @@ module.exports = {
   schedulePost,
   deletePost,
   getPost,
-  // exported for tests / debugging
   normaliseScheduledFor,
   splitCaptionForTwitter
 };

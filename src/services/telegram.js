@@ -1,33 +1,26 @@
 /**
- * Telegram service
- * ----------------
- * Implements the new Strong Group marketing workflow:
+ * Telegram service — multi-company workflow
+ * -----------------------------------------
  *
- *   1. /generate
- *      -> Agent calls calendar.generateCalendarForUpcomingMonth().
- *      -> Bot replies with the full content calendar for next month:
- *         12 social posts (numbered 1-12) and 2 blog posts (13-14),
- *         each with topic, caption, hashtags and suggested image
- *         description.
+ * The bot operates against ONE company at a time per chat. The
+ * currently-selected company is persisted in Supabase settings
+ * (`active_company:<chatId>`), so it survives restarts and deploys.
  *
- *   2. User creates each image in ChatGPT 5.5 and sends them as photos
- *      / documents to the bot.
- *      -> For every photo received the bot asks "Which post number is
- *         this image for? (1-14)".
- *      -> User replies with a number; bot saves the image, attaches it
- *         to that post and confirms.
- *      -> Alternatively the user can send a photo with the post number
- *         in the caption ("3") and the bot assigns it immediately.
+ *   /company             — show current company + list of available ones
+ *   /company strong      — switch to Strong Recruitment Group
+ *   /company zentra      — switch to Zentra Peptides
  *
- *   3. /status — shows which posts still need an image.
+ *   /generate            — generate next month's calendar for the active company
+ *   /calendar            — re-render the current calendar for the active company
+ *   /status              — show post status for the active company
+ *   /seturl <post#> <url>— set blog URL (only meaningful for companies with blog promos)
+ *   /schedule            — schedule everything for the active company on Zernio
+ *   /reset               — wipe the active company's current calendar
+ *   /help                — show available commands (rendered for the active company)
  *
- *   4. /schedule — once every post has an image, the bot schedules all
- *      14 posts on Zernio across the 5 channels. Blog promo posts go
- *      out with the blog image + promo caption + blog URL (the user
- *      can set the URL with /seturl <post#> <url> or the bot inserts
- *      the Strong Group news page as a fallback).
- *
- *   5. /reset — wipes the active calendar and lets the user start over.
+ * Image uploads (photo or image document) attach to the active
+ * company's calendar. Captions can include the post number for
+ * one-shot assignment.
  */
 
 const fs = require('fs');
@@ -36,32 +29,35 @@ const axios = require('axios');
 const TelegramBot = require('node-telegram-bot-api');
 const { DateTime } = require('luxon');
 
-const { env, BRAND, PROMPTS, PLATFORMS } = require('../config');
+const {
+  env,
+  getCompany,
+  getDefaultCompany,
+  listCompanies
+} = require('../config');
 const storage = require('../utils/storage');
 const logger = require('../utils/logger');
 const openai = require('./openaiClient');
 
-// Per-chat conversational state stored only in memory.
-//   { awaitingImageForPost: number|null,
-//     pendingImage: { fileId, filePath, publicUrl }|null,
-//     editingPostId: string|null }
+// Per-chat conversational state stored in memory.
+//   { awaitingImageForPost, pendingImage, editingPostId, companySlug }
 const chatState = new Map();
 
 function getState(chatId) {
   let s = chatState.get(chatId);
   if (!s) {
-    s = { awaitingImageForPost: null, pendingImage: null, editingPostId: null };
+    s = {
+      awaitingImageForPost: null,
+      pendingImage: null,
+      editingPostId: null,
+      companySlug: null
+    };
     chatState.set(chatId, s);
   }
   return s;
 }
 
 class TelegramService {
-  /**
-   * @param {object} deps
-   * @param {object} deps.zernio   - zernio service module
-   * @param {object} deps.calendar - calendar service module
-   */
   constructor({ zernio, calendar }) {
     this.zernio = zernio;
     this.calendar = calendar;
@@ -77,22 +73,30 @@ class TelegramService {
     }
     this.bot = new TelegramBot(env.telegramBotToken, { polling: true });
 
-    this.bot.on('message', (m) => this._onMessage(m).catch((err) => {
-      logger.error({ err: err.message, stack: err.stack }, 'message handler failed');
-    }));
+    this.bot.on('message', (m) =>
+      this._onMessage(m).catch((err) => {
+        logger.error(
+          { err: err.message, stack: err.stack },
+          'message handler failed'
+        );
+      })
+    );
     this.bot.on('polling_error', (err) =>
       logger.error({ err: err.message }, 'Telegram polling error')
     );
 
-    this.bot.setMyCommands([
-      { command: 'generate', description: 'Generate next month\'s content calendar' },
-      { command: 'calendar', description: 'Show the current calendar' },
-      { command: 'status',   description: 'Show which posts still need images' },
-      { command: 'seturl',   description: 'Set the blog URL for a blog promo post: /seturl <post#> <url>' },
-      { command: 'schedule', description: 'Schedule all posts on Zernio' },
-      { command: 'reset',    description: 'Wipe the active calendar' },
-      { command: 'help',     description: 'Show available commands' }
-    ]).catch(() => {});
+    this.bot
+      .setMyCommands([
+        { command: 'company',  description: 'Switch active company (e.g. /company zentra)' },
+        { command: 'generate', description: "Generate next month's calendar for the active company" },
+        { command: 'calendar', description: 'Show the current calendar' },
+        { command: 'status',   description: 'Show which posts still need images' },
+        { command: 'seturl',   description: '/seturl <post#> <url> — set a blog URL' },
+        { command: 'schedule', description: 'Schedule all posts on Zernio' },
+        { command: 'reset',    description: 'Wipe the active calendar' },
+        { command: 'help',     description: 'Show available commands' }
+      ])
+      .catch(() => {});
 
     logger.info('Telegram bot started');
   }
@@ -104,11 +108,37 @@ class TelegramService {
     await this._sendLong(env.telegramChatId, text);
   }
 
+  // -------------------- company selection --------------------
+
+  async _getActiveCompany(chatId) {
+    const state = getState(chatId);
+    if (state.companySlug) {
+      const c = getCompany(state.companySlug);
+      if (c) return c;
+    }
+    // Fall back to persisted setting, then default.
+    const persisted = await storage.getSetting(`active_company:${chatId}`);
+    const c = (persisted && getCompany(persisted)) || getDefaultCompany();
+    state.companySlug = c.slug;
+    return c;
+  }
+
+  async _setActiveCompany(chatId, slug) {
+    const c = getCompany(slug);
+    if (!c) return null;
+    const state = getState(chatId);
+    state.companySlug = c.slug;
+    state.awaitingImageForPost = null;
+    state.pendingImage = null;
+    state.editingPostId = null;
+    await storage.setSetting(`active_company:${chatId}`, c.slug);
+    return c;
+  }
+
   // -------------------- command + message routing --------------------
 
   async _onMessage(msg) {
     if (!msg) return;
-    // Only respond inside the configured chat ID.
     if (String(msg.chat.id) !== String(env.telegramChatId)) {
       logger.warn(
         { chatId: msg.chat.id, expected: env.telegramChatId },
@@ -117,10 +147,7 @@ class TelegramService {
       return;
     }
 
-    // Photo / document image upload.
-    if (msg.photo && msg.photo.length) {
-      return this._onPhoto(msg);
-    }
+    if (msg.photo && msg.photo.length) return this._onPhoto(msg);
     if (msg.document && /^image\//.test(msg.document.mime_type || '')) {
       return this._onDocumentImage(msg);
     }
@@ -128,24 +155,20 @@ class TelegramService {
     if (!msg.text) return;
     const text = msg.text.trim();
 
-    // Slash commands
-    if (text.startsWith('/')) {
-      return this._handleCommand(msg, text);
-    }
-
-    // Plain text — either: a post-number reply for a pending image,
-    // OR a caption-edit reply.
+    if (text.startsWith('/')) return this._handleCommand(msg, text);
     return this._handleFreeText(msg, text);
   }
 
   async _handleCommand(msg, text) {
     const [rawCmd, ...args] = text.split(/\s+/);
-    const cmd = rawCmd.toLowerCase().split('@')[0]; // strip @BotName if any
+    const cmd = rawCmd.toLowerCase().split('@')[0];
 
     switch (cmd) {
       case '/start':
       case '/help':
         return this._cmdHelp(msg);
+      case '/company':
+        return this._cmdCompany(msg, args);
       case '/generate':
         return this._cmdGenerate(msg);
       case '/calendar':
@@ -177,82 +200,165 @@ class TelegramService {
   // -------------------- commands --------------------
 
   async _cmdHelp(msg) {
-    const text = [
-      '<b>Strong Group Marketing Agent</b>',
+    const company = await this._getActiveCompany(msg.chat.id);
+    const all = listCompanies();
+    const lines = [
+      `<b>Marketing Agent — Active company: ${escapeHtml(company.displayName)}</b>`,
+      `<i>Platforms:</i> ${escapeHtml(company.platformOrderLabel)}`,
+      '',
+      '<b>Switch company</b>',
+      ...all.map(
+        (c) =>
+          `  • <code>/company ${escapeHtml(c.slug)}</code> — ${escapeHtml(c.displayName)}${
+            c.slug === company.slug ? ' (current)' : ''
+          }`
+      ),
       '',
       '<b>Workflow</b>',
-      '1. /generate — I plan next month\'s content (12 social posts + 2 blog posts) and send you the full calendar.',
+      "1. /generate — I plan next month's content and send you the full calendar.",
       '2. You create each image in ChatGPT 5.5 and send them to me here.',
-      '3. For each image I\'ll ask "which post number?" — reply with the number, or send the photo with the number in the caption.',
-      '4. /status — see which posts still need an image.',
-      '5. /seturl &lt;post#&gt; &lt;url&gt; — set the blog URL for a blog promo post.',
-      '6. /schedule — once all images are attached, I schedule everything across Facebook, Instagram, LinkedIn, Twitter/X and Google Business via Zernio.',
+      '3. For each image I\'ll ask "which post number?" — reply with the number, or send the photo with the number as its caption.',
+      '4. /status — see which posts still need an image.'
+    ];
+    if (company.monthly?.hasBlogPromos) {
+      lines.push(
+        '5. /seturl &lt;post#&gt; &lt;url&gt; — set the blog URL for a blog promo post.'
+      );
+    }
+    lines.push(
+      `${company.monthly?.hasBlogPromos ? '6' : '5'}. /schedule — once all images are attached, I schedule everything across ${escapeHtml(company.platformOrderLabel)} via Zernio.`,
       '',
       '<b>Other commands</b>',
+      '/company — show / switch active company',
       '/calendar — re-send the current calendar',
       '/reset — wipe the active calendar and start over',
       '/cancel — cancel a pending image assignment'
-    ].join('\n');
-    await this.bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
+    );
+    await this.bot.sendMessage(msg.chat.id, lines.join('\n'), {
+      parse_mode: 'HTML'
+    });
+  }
+
+  async _cmdCompany(msg, args) {
+    const current = await this._getActiveCompany(msg.chat.id);
+    if (!args.length) {
+      const all = listCompanies();
+      const lines = [
+        `<b>Active company:</b> ${escapeHtml(current.displayName)} (<code>${escapeHtml(current.slug)}</code>)`,
+        `<i>Platforms:</i> ${escapeHtml(current.platformOrderLabel)}`,
+        '',
+        '<b>Available companies</b>',
+        ...all.map(
+          (c) =>
+            `  • <code>/company ${escapeHtml(c.slug)}</code> — ${escapeHtml(c.displayName)}${
+              c.slug === current.slug ? ' (current)' : ''
+            }`
+        )
+      ];
+      await this.bot.sendMessage(msg.chat.id, lines.join('\n'), {
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+    const slug = args[0].toLowerCase();
+    const next = await this._setActiveCompany(msg.chat.id, slug);
+    if (!next) {
+      const known = listCompanies().map((c) => c.slug).join(', ');
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `Unknown company "${slug}". Known: ${known}.`
+      );
+      return;
+    }
+    await this.bot.sendMessage(
+      msg.chat.id,
+      `Switched active company to <b>${escapeHtml(next.displayName)}</b>.\n` +
+        `Platforms: ${escapeHtml(next.platformOrderLabel)}\n\n` +
+        'Send /generate to plan the next month, or /calendar to see the current one.',
+      { parse_mode: 'HTML' }
+    );
   }
 
   async _cmdGenerate(msg) {
+    const company = await this._getActiveCompany(msg.chat.id);
     await this.bot.sendMessage(
       msg.chat.id,
-      'Generating next month\'s content calendar — give me a moment…'
+      `Generating next month's content calendar for <b>${escapeHtml(company.displayName)}</b> — give me a moment…`,
+      { parse_mode: 'HTML' }
     );
     try {
-      const result = await this.calendar.generateCalendarForUpcomingMonth();
-      await this._sendCalendar(msg.chat.id, result);
+      const result = await this.calendar.generateCalendarForUpcomingMonth({
+        company
+      });
+      await this._sendCalendar(msg.chat.id, result, company);
       await this.bot.sendMessage(
         msg.chat.id,
         'Calendar ready. Create each image in ChatGPT 5.5 and send them to me here. ' +
-          'When you send a photo I\'ll ask which post number it\'s for — or you can ' +
+          "When you send a photo I'll ask which post number it's for — or you can " +
           'put the post number in the photo caption (e.g. send the photo with caption "3").'
       );
     } catch (err) {
-      logger.error({ err: err.message, stack: err.stack }, 'generate failed');
+      logger.error(
+        { err: err.message, stack: err.stack, company: company.slug },
+        'generate failed'
+      );
       await this.bot.sendMessage(
         msg.chat.id,
-        `Calendar generation failed: ${err.message}`
+        `Calendar generation failed for ${company.displayName}: ${err.message}`
       );
     }
   }
 
   async _cmdShowCalendar(msg) {
-    const monthKey = await storage.getSetting('last_calendar_month');
+    const company = await this._getActiveCompany(msg.chat.id);
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
     if (!monthKey) {
       await this.bot.sendMessage(
         msg.chat.id,
-        'No calendar yet. Send /generate to create next month\'s calendar.'
+        `No calendar yet for ${company.displayName}. Send /generate to create next month's calendar.`
       );
       return;
     }
-    const cal = await storage.getCalendar(monthKey);
-    const posts = await storage.listPostsByMonth(monthKey);
-    const blogs = await storage.listBlogsByMonth(monthKey);
+    const cal = await storage.getCalendar(monthKey, company.slug);
+    const posts = await storage.listPostsByMonth(monthKey, company.slug);
+    const blogs = await storage.listBlogsByMonth(monthKey, company.slug);
     const monthName = cal?.raw?.month || monthKey;
-    await this._sendCalendar(msg.chat.id, {
-      monthKey,
-      monthName,
-      posts,
-      blogs
-    });
+    await this._sendCalendar(
+      msg.chat.id,
+      { monthKey, monthName, posts, blogs, company: company.slug },
+      company
+    );
   }
 
   async _cmdStatus(msg) {
-    const monthKey = await storage.getSetting('last_calendar_month');
+    const company = await this._getActiveCompany(msg.chat.id);
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
     if (!monthKey) {
-      await this.bot.sendMessage(msg.chat.id, 'No active calendar.');
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `No active calendar for ${company.displayName}.`
+      );
       return;
     }
-    const posts = await storage.listPostsByMonth(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey, company.slug);
     if (!posts.length) {
-      await this.bot.sendMessage(msg.chat.id, 'No posts found for the active calendar.');
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `No posts found for ${company.displayName}'s active calendar.`
+      );
       return;
     }
 
-    const lines = [`<b>Status — ${escapeHtml(monthKey)}</b>`, ''];
+    const lines = [
+      `<b>${escapeHtml(company.displayName)} — Status — ${escapeHtml(monthKey)}</b>`,
+      ''
+    ];
     const missing = [];
     const scheduled = [];
     for (const p of posts) {
@@ -260,10 +366,17 @@ class TelegramService {
       const dt = DateTime.fromISO(p.scheduled_for).setZone(env.tz);
       const when = dt.toFormat('ccc d LLL HH:mm');
       let icon;
-      if (p.status === 'scheduled') { icon = '✅'; scheduled.push(p.post_number); }
-      else if (p.status === 'image_attached') icon = '🖼';
-      else if (p.status === 'schedule_failed') icon = '⚠️';
-      else { icon = '⏳'; missing.push(p.post_number); }
+      if (p.status === 'scheduled') {
+        icon = '✅';
+        scheduled.push(p.post_number);
+      } else if (p.status === 'image_attached') {
+        icon = '🖼';
+      } else if (p.status === 'schedule_failed') {
+        icon = '⚠️';
+      } else {
+        icon = '⏳';
+        missing.push(p.post_number);
+      }
       lines.push(
         `${icon} <b>${p.post_number}</b> [${tag}] ${escapeHtml(p.topic || p.sector)} — ${when}`
       );
@@ -277,13 +390,26 @@ class TelegramService {
     if (scheduled.length) {
       lines.push(`<b>Scheduled:</b> ${scheduled.join(', ')}`);
     }
-    await this.bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'HTML' });
+    await this.bot.sendMessage(msg.chat.id, lines.join('\n'), {
+      parse_mode: 'HTML'
+    });
   }
 
   async _cmdSetUrl(msg, args) {
+    const company = await this._getActiveCompany(msg.chat.id);
+    if (!company.monthly?.hasBlogPromos) {
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `${company.displayName} doesn't use blog promo posts, so /seturl doesn't apply.`
+      );
+      return;
+    }
     const [postNumStr, url] = args;
     const postNum = parseInt(postNumStr, 10);
-    const monthKey = await storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
     if (!monthKey || !postNum || !url) {
       await this.bot.sendMessage(
         msg.chat.id,
@@ -292,9 +418,12 @@ class TelegramService {
       );
       return;
     }
-    const post = await storage.getPostByNumber(monthKey, postNum);
+    const post = await storage.getPostByNumber(monthKey, postNum, company.slug);
     if (!post) {
-      await this.bot.sendMessage(msg.chat.id, `No post #${postNum} in the active calendar.`);
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `No post #${postNum} in the active ${company.displayName} calendar.`
+      );
       return;
     }
     if (post.kind !== 'blog_promo' || !post.blog_id) {
@@ -305,9 +434,6 @@ class TelegramService {
       return;
     }
     await storage.updateBlog(post.blog_id, { url });
-    // Replace the <BLOG_URL> token in the caption preview (the
-    // caption is persisted with the token; we substitute at schedule
-    // time too, but we also persist the URL here so /calendar shows it).
     await this.bot.sendMessage(
       msg.chat.id,
       `Blog URL for post #${postNum} set to ${escapeHtml(url)}.`,
@@ -316,12 +442,19 @@ class TelegramService {
   }
 
   async _cmdSchedule(msg) {
-    const monthKey = await storage.getSetting('last_calendar_month');
+    const company = await this._getActiveCompany(msg.chat.id);
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
     if (!monthKey) {
-      await this.bot.sendMessage(msg.chat.id, 'No active calendar to schedule.');
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `No active calendar to schedule for ${company.displayName}.`
+      );
       return;
     }
-    const posts = await storage.listPostsByMonth(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey, company.slug);
     const missing = posts.filter((p) => !p.image_url);
     if (missing.length) {
       await this.bot.sendMessage(
@@ -335,10 +468,11 @@ class TelegramService {
 
     await this.bot.sendMessage(
       msg.chat.id,
-      `Scheduling ${posts.length} posts across Facebook, Instagram, LinkedIn, Twitter/X and Google Business…`
+      `Scheduling ${posts.length} ${escapeHtml(company.displayName)} posts across ${escapeHtml(company.platformOrderLabel)}…`,
+      { parse_mode: 'HTML' }
     );
 
-    const blogs = await storage.listBlogsByMonth(monthKey);
+    const blogs = await storage.listBlogsByMonth(monthKey, company.slug);
     const blogsById = new Map(blogs.map((b) => [b.id, b]));
 
     let okCount = 0;
@@ -349,18 +483,23 @@ class TelegramService {
         continue;
       }
       try {
-        await storage.updatePost(p.id, { status: 'scheduling', schedule_error: null });
+        await storage.updatePost(p.id, {
+          status: 'scheduling',
+          schedule_error: null
+        });
 
-        const caption = this._buildCaptionForZernio(p, blogsById);
+        const caption = this._buildCaptionForZernio(p, blogsById, company);
         const result = await this.zernio.schedulePost({
           caption,
           scheduledForIso: p.scheduled_for,
-          platforms: p.platforms && p.platforms.length
-            ? p.platforms
-            : BRAND.defaultPlatforms,
+          platforms:
+            p.platforms && p.platforms.length
+              ? p.platforms
+              : company.brand.defaultPlatforms,
           imageUrl: p.image_url,
           hashtags: p.hashtags || [],
-          timezone: env.tz
+          timezone: env.tz,
+          company
         });
         const zernioId =
           result?.id || result?.postId || result?.data?.id || null;
@@ -371,7 +510,7 @@ class TelegramService {
         okCount++;
       } catch (err) {
         logger.error(
-          { err: err.message, postNumber: p.post_number },
+          { err: err.message, postNumber: p.post_number, company: company.slug },
           'Schedule failed for post'
         );
         await storage.updatePost(p.id, {
@@ -383,15 +522,16 @@ class TelegramService {
     }
 
     if (!failures.length) {
-      await storage.updateCalendarStatus(monthKey, 'scheduled');
+      await storage.updateCalendarStatus(monthKey, 'scheduled', company.slug);
       await this.bot.sendMessage(
         msg.chat.id,
-        `All ${okCount} posts scheduled successfully on Zernio across all 5 channels.`
+        `All ${okCount} ${escapeHtml(company.displayName)} posts scheduled successfully on Zernio across ${escapeHtml(company.platformOrderLabel)}.`,
+        { parse_mode: 'HTML' }
       );
     } else {
       await this.bot.sendMessage(
         msg.chat.id,
-        `Scheduled ${okCount} of ${posts.length}. ` +
+        `Scheduled ${okCount} of ${posts.length} for ${company.displayName}. ` +
           `Failures:\n` +
           failures
             .map((f) => `  • Post ${f.number}: ${f.error}`)
@@ -402,28 +542,34 @@ class TelegramService {
   }
 
   async _cmdReset(msg) {
-    const monthKey = await storage.getSetting('last_calendar_month');
+    const company = await this._getActiveCompany(msg.chat.id);
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
     if (!monthKey) {
-      await this.bot.sendMessage(msg.chat.id, 'Nothing to reset.');
+      await this.bot.sendMessage(
+        msg.chat.id,
+        `Nothing to reset for ${company.displayName}.`
+      );
       return;
     }
-    await storage.deletePostsForMonth(monthKey);
-    await storage.deleteBlogsForMonth(monthKey);
-    await storage.setSetting('last_calendar_month', '');
+    await storage.deletePostsForMonth(monthKey, company.slug);
+    await storage.deleteBlogsForMonth(monthKey, company.slug);
+    await storage.setCompanySetting('last_calendar_month', '', company.slug);
     const state = getState(msg.chat.id);
     state.awaitingImageForPost = null;
     state.pendingImage = null;
     state.editingPostId = null;
     await this.bot.sendMessage(
       msg.chat.id,
-      `Wiped the active calendar (${monthKey}). Send /generate to start fresh.`
+      `Wiped ${company.displayName}'s active calendar (${monthKey}). Send /generate to start fresh.`
     );
   }
 
   // -------------------- photo handling --------------------
 
   async _onPhoto(msg) {
-    // Telegram delivers multiple sizes; pick the largest.
     const photo = msg.photo[msg.photo.length - 1];
     const captionNum = parseInt((msg.caption || '').trim(), 10);
 
@@ -435,13 +581,16 @@ class TelegramService {
       return;
     }
 
-    // No caption → ask which post.
     const state = getState(msg.chat.id);
     state.pendingImage = saved;
     state.awaitingImageForPost = null;
 
-    const monthKey = await storage.getSetting('last_calendar_month');
-    const posts = monthKey ? await storage.listPostsByMonth(monthKey) : [];
+    const company = await this._getActiveCompany(msg.chat.id);
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
+    const posts = monthKey ? await storage.listPostsByMonth(monthKey, company.slug) : [];
     const list = posts.length
       ? '\n\n' +
         posts
@@ -454,7 +603,7 @@ class TelegramService {
       : '';
     await this.bot.sendMessage(
       msg.chat.id,
-      `Got it. Which post number is this image for? Reply with a number 1-${
+      `Got it. (Active company: ${company.displayName}.) Which post number is this image for? Reply with a number 1-${
         posts.length || 14
       }, or /cancel.${list}`
     );
@@ -476,16 +625,16 @@ class TelegramService {
     state.pendingImage = saved;
     state.awaitingImageForPost = null;
 
+    const company = await this._getActiveCompany(msg.chat.id);
     await this.bot.sendMessage(
       msg.chat.id,
-      'Got the image. Which post number is this for? Reply with a number, or /cancel.'
+      `Got the image. (Active company: ${company.displayName}.) Which post number is this for? Reply with a number, or /cancel.`
     );
   }
 
   async _handleFreeText(msg, text) {
     const state = getState(msg.chat.id);
 
-    // Number reply for a pending image
     if (state.pendingImage) {
       const num = parseInt(text, 10);
       if (Number.isInteger(num)) {
@@ -501,7 +650,6 @@ class TelegramService {
       return;
     }
 
-    // Caption editing
     if (state.editingPostId) {
       const post = await storage.getPost(state.editingPostId);
       state.editingPostId = null;
@@ -510,10 +658,13 @@ class TelegramService {
       if (text.toLowerCase().startsWith('!ai')) {
         const instruction = text.slice(3).trim();
         try {
+          const company =
+            getCompany(post.company) || (await this._getActiveCompany(msg.chat.id));
           newCaption = await rewriteCaption({
             original: post.caption,
             instruction,
-            post
+            post,
+            company
           });
         } catch (err) {
           await this.bot.sendMessage(
@@ -531,7 +682,6 @@ class TelegramService {
       );
       return;
     }
-    // Otherwise: gently nudge.
     await this.bot.sendMessage(
       msg.chat.id,
       'Send /help to see what I can do.'
@@ -563,16 +713,23 @@ class TelegramService {
   }
 
   async _assignImageToPost(chatId, postNumber, saved) {
-    const monthKey = await storage.getSetting('last_calendar_month');
+    const company = await this._getActiveCompany(chatId);
+    const monthKey = await storage.getCompanySetting(
+      'last_calendar_month',
+      company.slug
+    );
     if (!monthKey) {
-      await this.bot.sendMessage(chatId, 'No active calendar.');
+      await this.bot.sendMessage(
+        chatId,
+        `No active calendar for ${company.displayName}.`
+      );
       return;
     }
-    const post = await storage.getPostByNumber(monthKey, postNumber);
+    const post = await storage.getPostByNumber(monthKey, postNumber, company.slug);
     if (!post) {
       await this.bot.sendMessage(
         chatId,
-        `No post #${postNumber} in the active calendar. Send a number from the calendar.`
+        `No post #${postNumber} in the active ${company.displayName} calendar. Send a number from the calendar.`
       );
       return;
     }
@@ -583,8 +740,7 @@ class TelegramService {
       status: 'image_attached'
     });
 
-    // Summary
-    const posts = await storage.listPostsByMonth(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey, company.slug);
     const missing = posts.filter((p) => !p.image_url).map((p) => p.post_number);
     const done = posts.length - missing.length;
 
@@ -596,27 +752,34 @@ class TelegramService {
     }
     await this.bot.sendMessage(
       chatId,
-      `Image attached to post #${postNumber} (${escapeHtml(post.topic || post.sector)}).${trailer}`,
+      `Image attached to ${company.displayName} post #${postNumber} (${escapeHtml(post.topic || post.sector)}).${trailer}`,
       { parse_mode: 'HTML' }
     );
   }
 
-  // -------------------- calendar rendering --------------------
+  // -------------------- calendar rendering ---
 
-  async _sendCalendar(chatId, { monthKey, monthName, posts, blogs }) {
+  async _sendCalendar(chatId, { monthKey, monthName, posts, blogs }, companyArg) {
+    // Resolve the company so headers / labels render correctly. If a
+    // caller didn't pass one (e.g. cron), infer from the first post.
+    let company = companyArg;
+    if (!company) {
+      const slug = (posts && posts[0] && posts[0].company) || null;
+      company = (slug && getCompany(slug)) || getDefaultCompany();
+    }
+
     const header = [
-      `<b>📅 ${escapeHtml(monthName || monthKey)} content calendar</b>`,
-      `Channels: Facebook · Instagram · LinkedIn · Twitter/X · Google Business`,
+      `<b>📅 ${escapeHtml(company.displayName)} — ${escapeHtml(monthName || monthKey)} content calendar</b>`,
+      `Channels: ${escapeHtml(company.platformOrderLabel)}`,
       ''
     ].join('\n');
     await this.bot.sendMessage(chatId, header, { parse_mode: 'HTML' });
 
     const social = posts.filter((p) => p.kind === 'social');
     const blogPromo = posts.filter((p) => p.kind === 'blog_promo');
-    const blogsById = new Map(blogs.map((b) => [b.id, b]));
+    const blogsById = new Map((blogs || []).map((b) => [b.id, b]));
 
-    // 12 social posts
-    let chunk = '<b>Social posts (3/week × 4 weeks)</b>\n\n';
+    let chunk = '<b>Social posts</b>\n\n';
     for (const p of social) {
       const block = this._formatPostBlock(p);
       if ((chunk + block).length > 3500) {
@@ -629,7 +792,6 @@ class TelegramService {
       await this.bot.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
     }
 
-    // 2 blog promo posts
     if (blogPromo.length) {
       chunk = '<b>Blog posts (scheduled as social promo + image)</b>\n\n';
       for (const p of blogPromo) {
@@ -682,16 +844,15 @@ class TelegramService {
     ].join('\n');
   }
 
-  _buildCaptionForZernio(post, blogsById) {
+  _buildCaptionForZernio(post, blogsById, company) {
     const hashtags = (post.hashtags || []).join(' ');
     let body = post.caption || '';
 
     if (post.kind === 'blog_promo' && post.blog_id) {
       const blog = blogsById.get(post.blog_id);
-      const url = blog?.url || BRAND.blog.siteBaseUrl;
+      const url = blog?.url || company.brand.blog?.siteBaseUrl || '';
       body = body.replace(/<BLOG_URL>/g, url);
-      // If the template didn't have the token, append the URL on its own line.
-      if (!/https?:\/\//.test(body)) body += `\n\n${url}`;
+      if (url && !/https?:\/\//.test(body)) body += `\n\n${url}`;
     }
 
     return [body, hashtags].filter(Boolean).join('\n\n').trim();
@@ -711,12 +872,13 @@ class TelegramService {
 
 // ---------------- caption rewrite helper (used by /edit text) --------
 
-async function rewriteCaption({ original, instruction, post }) {
+async function rewriteCaption({ original, instruction, post, company }) {
+  const cfg = company || getDefaultCompany();
   const completion = await openai.chat.completions.create({
     model: env.openaiTextModel,
     temperature: 0.7,
     messages: [
-      { role: 'system', content: PROMPTS.CAPTION_EDIT_SYSTEM_PROMPT },
+      { role: 'system', content: cfg.prompts.CAPTION_EDIT_SYSTEM_PROMPT },
       {
         role: 'user',
         content:

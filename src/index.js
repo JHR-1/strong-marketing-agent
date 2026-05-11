@@ -1,15 +1,12 @@
 /**
- * Strong Recruitment Group — Marketing Agent
+ * Strong / Zentra Marketing Agent — multi-company entry point.
  *
- * Entry point. Boots:
+ * Boots:
  *   - Express (health + status + manual triggers)
- *   - The Telegram bot (polling)
+ *   - The Telegram bot (polling) with /company switching
  *   - The monthly cron job (default 09:00 on the 20th, Europe/London)
- *
- * Workflow (high-level):
- *   /generate (Telegram or cron) -> calendar planned (12 social + 2 blog)
- *   user uploads images via Telegram, matches to post numbers
- *   /schedule -> all posts scheduled on Zernio across 5 channels
+ *     which now iterates over EVERY configured company and sends each
+ *     calendar to Telegram in turn.
  */
 
 require('dotenv').config();
@@ -18,7 +15,7 @@ const express = require('express');
 const cron = require('node-cron');
 const path = require('path');
 
-const { env } = require('./config');
+const { env, listCompanies } = require('./config');
 const logger = require('./utils/logger');
 const storage = require('./utils/storage');
 
@@ -41,7 +38,6 @@ async function main() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  // Serve user-uploaded images so Zernio can fetch them.
   app.use(
     '/images',
     express.static(path.resolve(env.dataDir, 'images'), {
@@ -56,10 +52,17 @@ async function main() {
   app.get('/', (req, res) => {
     res.json({
       ok: true,
-      service: 'strong-marketing-agent',
+      service: 'marketing-agent',
       version: require('../package.json').version,
       tz: env.tz,
-      cron: env.calendarCron
+      cron: env.calendarCron,
+      companies: listCompanies().map((c) => ({
+        slug: c.slug,
+        displayName: c.displayName,
+        platforms: Object.keys(c.platforms),
+        zernioProfileId: c.zernio.profileId
+      })),
+      defaultCompany: env.defaultCompanySlug
     });
   });
 
@@ -75,36 +78,62 @@ async function main() {
     );
   });
 
-  // Cron: monthly calendar generation (planning only — user still
-  // needs to send images and run /schedule).
+  // Cron: monthly calendar generation for ALL companies.
   if (cron.validate(env.calendarCron)) {
     cron.schedule(
       env.calendarCron,
       async () => {
-        logger.info('Cron fired: generating next month calendar');
+        const all = listCompanies();
+        logger.info(
+          { count: all.length, slugs: all.map((c) => c.slug) },
+          'Cron fired: generating next month calendars for all companies'
+        );
+        for (const company of all) {
+          try {
+            await telegram.sendInfo(
+              `📅 Generating <b>${company.displayName}</b>'s calendar for the upcoming month…`
+            );
+            const result = await calendar.generateCalendarForUpcomingMonth({
+              company
+            });
+            await telegram.sendInfo(
+              `${company.displayName} — ${result.monthName} ${result.year} calendar is ready.`
+            );
+            await telegram._sendCalendar(
+              env.telegramChatId,
+              result,
+              company
+            );
+          } catch (err) {
+            logger.error(
+              { err: err.message, company: company.slug },
+              'cron generate failed for company'
+            );
+            await telegram.sendInfo(
+              `Calendar generation failed for ${company.displayName}: ${err.message}`
+            );
+          }
+        }
         try {
-          const result = await calendar.generateCalendarForUpcomingMonth();
           await telegram.sendInfo(
-            `📅 Next month's calendar (${result.monthName} ${result.year}) is ready — sending it now.`
+            'All company calendars sent. Create each image in ChatGPT 5.5 and send them here. ' +
+              'Use /company &lt;slug&gt; to switch between companies, then attach images and run /schedule per company.'
           );
-          // Re-use the same render path the /calendar command uses.
-          await telegram._sendCalendar(env.telegramChatId, result);
-          await telegram.sendInfo(
-            'Create each image in ChatGPT 5.5 and send them here. ' +
-              'When all images are attached, run /schedule.'
-          );
-        } catch (err) {
-          logger.error({ err: err.message }, 'cron generate failed');
-          await telegram.sendInfo(
-            `Calendar generation failed: ${err.message}`
-          );
+        } catch (_) {
+          /* ignore */
         }
       },
       { timezone: env.tz }
     );
-    logger.info({ cron: env.calendarCron, tz: env.tz }, 'Cron scheduled');
+    logger.info(
+      { cron: env.calendarCron, tz: env.tz },
+      'Cron scheduled (multi-company)'
+    );
   } else {
-    logger.error({ cron: env.calendarCron }, 'Invalid CALENDAR_CRON expression');
+    logger.error(
+      { cron: env.calendarCron },
+      'Invalid CALENDAR_CRON expression'
+    );
   }
 
   // Graceful shutdown
@@ -114,7 +143,10 @@ async function main() {
     logger.error({ err }, 'unhandledRejection')
   );
   process.on('uncaughtException', (err) =>
-    logger.error({ err: err.message, stack: err.stack }, 'uncaughtException')
+    logger.error(
+      { err: err.message, stack: err.stack },
+      'uncaughtException'
+    )
   );
 }
 
