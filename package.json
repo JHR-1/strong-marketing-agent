@@ -1,0 +1,39 @@
+{
+  "name": "strong-marketing-agent",
+  "version": "1.0.0",
+  "description": "Persistent marketing automation agent for Strong Recruitment Group: monthly content calendar, AI image generation, Telegram approval workflow, and Zernio multi-channel scheduling.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "marketing",
+    "automation",
+    "telegram",
+    "zernio",
+    "openai",
+    "strong-recruitment-group"
+  ],
+  "author": "JHR-1",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "axios": "^1.7.9",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "form-data": "^4.0.1",
+    "luxon": "^3.5.0",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.66.0",
+    "openai": "^4.77.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0"
+  }
+}
