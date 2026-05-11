@@ -1,9 +1,13 @@
 /**
  * Calendar service
  * ----------------
- * Generates a one-month content calendar (3 posts/wk + 2 blogs) using
- * GPT-4.1, normalises the output, persists it, then enqueues every
- * social post for image generation + Telegram approval.
+ * Generates a one-month content calendar using GPT-4.1:
+ *   - 12 social media posts (3/week × 4 weeks, Mon/Wed/Fri 09:00 UK)
+ *   - 2 blog posts that are scheduled on social as blog-promo posts
+ *     on dedicated slots later in the month.
+ *
+ * Each post stores topic / caption / hashtags / suggested image
+ * description; the user supplies the actual image via Telegram.
  */
 
 const { randomUUID } = require('crypto');
@@ -15,14 +19,18 @@ const dates = require('../utils/dates');
 const storage = require('../utils/storage');
 const logger = require('../utils/logger');
 
+const SOCIAL_POST_COUNT = 12;
+const BLOG_POST_COUNT = 2;
+
 /**
- * Public entry point: generate, persist, and enqueue a calendar for
- * (now + lookaheadMonths). Defaults to next month.
+ * Generate the calendar for the upcoming month (now + lookaheadMonths).
+ * Persists the calendar + every post + blog into SQLite and returns a
+ * summary used by the Telegram service to render the review message.
+ *
+ * If a calendar already exists for the target month it is replaced.
  */
 async function generateCalendarForUpcomingMonth({
-  lookaheadMonths = env.calendarLookaheadMonths,
-  imageGen,
-  telegram
+  lookaheadMonths = env.calendarLookaheadMonths
 } = {}) {
   const now = DateTime.now().setZone(env.tz);
   const { year, month, monthName } = dates.targetMonth(now, lookaheadMonths);
@@ -31,111 +39,167 @@ async function generateCalendarForUpcomingMonth({
   logger.info({ monthKey, monthName, year }, 'Generating monthly calendar');
 
   const awarenessDays = dates.awarenessDaysForMonth(year, month);
-  const slots = dates.postingSlotsForMonth(year, month, BRAND.schedule.timeUk, env.tz);
+  const allSlots = dates.postingSlotsForMonth(
+    year,
+    month,
+    BRAND.schedule.timeUk,
+    env.tz
+  );
 
-  const calendar = await callLlmForCalendar({ year, month, monthName, awarenessDays });
+  // Reserve slots: first 12 Mon/Wed/Fri 09:00 slots for social posts.
+  // Then 2 additional slots (preferably mid-month and late-month) for
+  // the blog promo posts. If the month has fewer than 14 Mon/Wed/Fri
+  // slots we fall back to whatever is available.
+  const { socialSlotIsos, blogSlotIsos } = splitSlots(allSlots);
 
-  // Normalise: align planned posts to the actual Mon/Wed/Fri 09:00 slots
-  // for the month, in order. If LLM returned more posts than slots, trim.
-  const normalisedPosts = normalisePostsToSlots(calendar.social_posts || [], slots);
+  if (socialSlotIsos.length < SOCIAL_POST_COUNT) {
+    logger.warn(
+      { socialSlots: socialSlotIsos.length },
+      'Month has fewer than 12 Mon/Wed/Fri slots — using all available'
+    );
+  }
 
-  // Persist calendar + posts + blogs
-  const calendarId = storage.saveCalendar(monthKey, {
-    ...calendar,
-    social_posts: normalisedPosts
+  const calendar = await callLlmForCalendar({
+    year,
+    month,
+    monthName,
+    awarenessDays,
+    socialSlotIsos,
+    blogSlotIsos
   });
 
-  for (const p of normalisedPosts) {
-    storage.insertPost({
-      id: p.id,
-      calendar_id: calendarId,
-      month_key: monthKey,
-      scheduled_for: p.scheduled_for,
-      sector: p.sector,
-      content_type: p.content_type,
-      badge_label: p.badge_label,
-      headline: p.headline,
-      headline_key_word: p.headline_key_word,
-      body_copy: p.body_copy,
-      body_emphasis_phrase: p.body_emphasis_phrase,
-      cta: p.cta,
-      caption: p.caption,
-      caption_quote: p.caption_quote,
-      attribution: p.attribution,
-      platforms: p.platforms,
-      image_concept: p.image_concept
-    });
-  }
+  // Wipe any previous attempt for this month so the user gets a clean
+  // calendar to review.
+  storage.deletePostsForMonth(monthKey);
+  storage.deleteBlogsForMonth(monthKey);
 
-  for (const b of calendar.blogs || []) {
-    storage.insertBlog({
+  const calendarId = storage.saveCalendar(
+    monthKey,
+    calendar,
+    'awaiting_images'
+  );
+
+  // ---- 12 social posts ----
+  const socialPosts = (calendar.social_posts || []).slice(0, SOCIAL_POST_COUNT);
+  socialPosts.forEach((p, i) => {
+    const slotIso = socialSlotIsos[i] || p.scheduled_for;
+    const id = randomUUID();
+    storage.insertPost({
+      id,
       calendar_id: calendarId,
       month_key: monthKey,
-      title: b.title,
-      tone: b.tone,
-      target_word_count: b.target_word_count || 900,
-      outline: b.outline || []
+      post_number: i + 1,
+      kind: 'social',
+      blog_id: null,
+      scheduled_for: slotIso,
+      sector: p.sector || 'General',
+      content_type: p.content_type || 'sector_promo',
+      topic: p.topic || '',
+      caption: p.caption || '',
+      hashtags: dedupeHashtags(p.hashtags, p.sector),
+      image_description: p.image_description || '',
+      platforms: BRAND.defaultPlatforms
     });
-  }
+  });
+
+  // ---- 2 blogs + their promo posts ----
+  const blogPosts = (calendar.blog_posts || []).slice(0, BLOG_POST_COUNT);
+  blogPosts.forEach((b, i) => {
+    const blogId = storage.insertBlog({
+      calendar_id: calendarId,
+      month_key: monthKey,
+      topic: b.topic || '',
+      blog_description: b.blog_description || '',
+      url: null
+    });
+
+    const slotIso = blogSlotIsos[i] || b.scheduled_for;
+    const id = randomUUID();
+    storage.insertPost({
+      id,
+      calendar_id: calendarId,
+      month_key: monthKey,
+      post_number: SOCIAL_POST_COUNT + i + 1, // 13, 14
+      kind: 'blog_promo',
+      blog_id: blogId,
+      scheduled_for: slotIso,
+      sector: b.sector || 'General',
+      content_type: 'blog_promo',
+      topic: b.topic || '',
+      caption: b.promo_caption || '',
+      hashtags: dedupeHashtags(b.promo_hashtags, b.sector),
+      image_description: b.image_description || '',
+      platforms: BRAND.defaultPlatforms
+    });
+  });
 
   storage.setSetting('last_calendar_run_at', new Date().toISOString());
   storage.setSetting('last_calendar_month', monthKey);
 
-  // Kick off image generation + Telegram approval per post (sequentially
-  // to be polite with rate limits and keep the Telegram feed readable).
-  if (imageGen && telegram) {
-    for (const p of normalisedPosts) {
-      try {
-        await processPostForApproval({ post: p, imageGen, telegram });
-      } catch (err) {
-        logger.error({ err, postId: p.id }, 'Failed to process post for approval');
-      }
-    }
+  const posts = storage.listPostsByMonth(monthKey);
+  const blogs = storage.listBlogsByMonth(monthKey);
 
-    // Send blog summary to Telegram for review
-    if ((calendar.blogs || []).length) {
-      await telegram.sendBlogSummary({ monthName, year, blogs: calendar.blogs });
-    }
-  } else {
-    logger.warn('No imageGen / telegram service supplied — skipping approval flow');
-  }
-
-  return { monthKey, monthName, year, calendar, posts: normalisedPosts };
-}
-
-/**
- * Generate image, store it, then send to Telegram for approval.
- */
-async function processPostForApproval({ post, imageGen, telegram }) {
-  logger.info({ postId: post.id, headline: post.headline }, 'Generating image');
-  const { localPath, publicUrl } = await imageGen.generatePostImage(post);
-
-  storage.updatePost(post.id, {
-    image_path: localPath,
-    image_url: publicUrl,
-    status: 'awaiting_approval'
-  });
-
-  const messageId = await telegram.sendPostForApproval({
-    post,
-    imagePath: localPath,
-    imageUrl: publicUrl
-  });
-
-  if (messageId) {
-    storage.updatePost(post.id, { telegram_message_id: messageId });
-  }
+  return { monthKey, monthName, year, posts, blogs };
 }
 
 // ---------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------
 
-async function callLlmForCalendar({ year, month, monthName, awarenessDays }) {
+function splitSlots(allSlots) {
+  // Pick the first 12 slots for social posts; choose 2 spread blog
+  // slots from the remainder (or fall back to slots 13 & 14 if the
+  // month is short).
+  const socialSlotIsos = allSlots.slice(0, SOCIAL_POST_COUNT).map((s) => s.toISO());
+  const leftover = allSlots.slice(SOCIAL_POST_COUNT);
+
+  let blogSlots = [];
+  if (leftover.length >= 2) {
+    // First leftover and last leftover, to spread them out.
+    blogSlots = [leftover[0], leftover[leftover.length - 1]];
+  } else if (leftover.length === 1) {
+    blogSlots = [leftover[0]];
+  }
+  // Pad to 2 if the month is short — re-use a social slot at the end.
+  while (blogSlots.length < BLOG_POST_COUNT && allSlots.length) {
+    blogSlots.push(allSlots[allSlots.length - 1]);
+  }
+
+  return {
+    socialSlotIsos,
+    blogSlotIsos: blogSlots.map((s) => s.toISO())
+  };
+}
+
+function dedupeHashtags(provided = [], sector = null) {
+  const out = new Set();
+  for (const h of provided || []) {
+    if (typeof h === 'string' && h.trim()) {
+      out.add(h.startsWith('#') ? h : `#${h}`);
+    }
+  }
+  for (const h of BRAND.hashtagsBase) out.add(h);
+  if (sector && BRAND.sectorHashtags[sector]) {
+    for (const h of BRAND.sectorHashtags[sector]) out.add(h);
+  }
+  // Cap at 8 to stay clean
+  return Array.from(out).slice(0, 8);
+}
+
+async function callLlmForCalendar({
+  year,
+  month,
+  monthName,
+  awarenessDays,
+  socialSlotIsos,
+  blogSlotIsos
+}) {
   const userPrompt = PROMPTS.buildCalendarUserPrompt({
     year,
     monthName,
-    awarenessDays
+    awarenessDays,
+    socialSlots: socialSlotIsos,
+    blogSlots: blogSlotIsos
   });
 
   const completion = await openai.chat.completions.create({
@@ -156,51 +220,19 @@ async function callLlmForCalendar({ year, month, monthName, awarenessDays }) {
     logger.error({ err, raw }, 'Calendar LLM returned invalid JSON');
     throw new Error('Calendar LLM returned invalid JSON');
   }
-  return parsed;
-}
 
-/**
- * Map LLM-generated posts onto the actual Mon/Wed/Fri 09:00 slots for
- * the month. We trust the LLM's ordering and assign in sequence,
- * trimming or padding as needed.
- */
-function normalisePostsToSlots(llmPosts, slots) {
-  // Sort posts by their declared date, fall back to insertion order.
-  const sorted = [...llmPosts].sort((a, b) =>
-    (a.date || '').localeCompare(b.date || '')
-  );
-
-  const out = [];
-  const limit = Math.min(sorted.length, slots.length);
-  for (let i = 0; i < limit; i++) {
-    const p = sorted[i];
-    const slot = slots[i];
-    out.push({
-      id: randomUUID(),
-      scheduled_for: slot.toISO(),
-      weekday: slot.toFormat('ccc'),
-      time: slot.toFormat('HH:mm'),
-      sector: p.sector || 'General',
-      content_type: p.content_type || 'sector_promo',
-      badge_label: p.badge_label || (p.sector || 'STRONG GROUP'),
-      headline: (p.headline || '').toUpperCase().slice(0, 80),
-      headline_key_word: (p.headline_key_word || '').toUpperCase(),
-      body_copy: p.body_copy || '',
-      body_emphasis_phrase: p.body_emphasis_phrase || '',
-      cta: p.cta || 'Contact us today',
-      caption: p.caption || '',
-      platforms: Array.isArray(p.platforms) && p.platforms.length
-        ? p.platforms
-        : BRAND.defaultPlatforms,
-      image_concept: p.image_concept || '',
-      attribution: p.attribution || '',
-      caption_quote: p.caption_quote || ''
-    });
+  // Light validation
+  if (!Array.isArray(parsed.social_posts) || parsed.social_posts.length < 1) {
+    throw new Error('LLM did not return social_posts');
   }
-  return out;
+  if (!Array.isArray(parsed.blog_posts) || parsed.blog_posts.length < 1) {
+    throw new Error('LLM did not return blog_posts');
+  }
+  return parsed;
 }
 
 module.exports = {
   generateCalendarForUpcomingMonth,
-  processPostForApproval
+  SOCIAL_POST_COUNT,
+  BLOG_POST_COUNT
 };

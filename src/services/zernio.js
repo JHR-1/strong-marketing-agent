@@ -1,11 +1,12 @@
 /**
  * Zernio service
  * --------------
- * Thin wrapper around Zernio's REST API:
+ * Thin wrapper around Zernio's REST API.
  *  - listAccounts()
  *  - schedulePost({ caption, scheduledForIso, platforms[], imageUrl })
  *
- * Uses the platform/account-id mapping defined in config/platforms.js.
+ * The platform/account-id mapping lives in config/platforms.js so it
+ * is rotatable via environment variables.
  */
 
 const axios = require('axios');
@@ -38,7 +39,8 @@ async function listProfiles() {
  * @param {object} args
  * @param {string} args.caption          - text content of the post
  * @param {string} args.scheduledForIso  - ISO 8601 timestamp (UTC ok)
- * @param {string[]} args.platforms      - internal platform keys (e.g. ['linkedin','facebook'])
+ * @param {string[]} args.platforms      - internal platform keys
+ *                                         (e.g. ['linkedin','facebook','instagram','twitter','google'])
  * @param {string} [args.imageUrl]       - public URL of the image to attach
  * @param {string} [args.timezone='Europe/London']
  * @param {boolean} [args.publishNow=false]
@@ -73,13 +75,16 @@ async function schedulePost({
   }
 
   logger.info(
-    { scheduledForIso, platforms: platforms, imageUrl },
+    { scheduledForIso, platforms, imageUrl, hasImage: !!imageUrl },
     'Scheduling Zernio post'
   );
 
   try {
     const { data } = await http.post('/posts', body);
-    logger.info({ zernioId: data?.id || data?.postId }, 'Zernio scheduled');
+    logger.info(
+      { zernioId: data?.id || data?.postId || data?.data?.id },
+      'Zernio scheduled'
+    );
     return data;
   } catch (err) {
     const status = err.response?.status;

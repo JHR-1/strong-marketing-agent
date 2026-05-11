@@ -1,45 +1,76 @@
 # Strong Recruitment Group — Marketing Agent
 
 A persistent Node.js marketing automation service for **Strong Recruitment Group**.
-On the 20th of every month it auto-generates next month's social calendar
-(3 posts/week + 2 blog outlines), produces on-brand 1080×1080 graphics with
-OpenAI's `gpt-image-1`, sends every post to Telegram for human approval,
-and on approval schedules across all 5 connected channels via the
-[Zernio API](https://zernio.com).
+Once a month it plans the full content calendar for next month
+(12 social posts + 2 blog posts), sends it to Telegram for review,
+accepts user-uploaded images from ChatGPT 5.5, matches each image to a
+post, and then schedules every post across all five connected channels
+via the [Zernio](https://zernio.com) API.
 
 ```
-GPT-4.1  ─►  monthly calendar JSON
-   │
-   ▼
-gpt-image-1  ─►  1080×1080 PNG (saved + served at /images/<id>.png)
-   │
-   ▼
-Telegram bot  ─►  [Approve] [Reject] [Edit Caption]
-   │
-   ▼ (Approve)
-Zernio API   ─►  Facebook · Instagram · LinkedIn · Twitter/X · Google Business
+GPT-4.1            →  monthly content calendar (12 social + 2 blog)
+                      → topic / caption / hashtags / image idea
+Telegram bot       →  shows you the calendar for review
+You (ChatGPT 5.5)  →  create each image, send to the bot
+Telegram bot       →  ask "which post number?", attach image
+/schedule          →  Zernio schedules everything across
+                      Facebook · Instagram · LinkedIn · Twitter/X · Google Business
 ```
+
+The agent no longer generates images itself — Nick designs them in
+ChatGPT 5.5 following the in-house style guide
+(`assets/style-guide.md`) and uploads them via Telegram.
 
 ---
 
 ## What it does
 
-1. **Cron** (`0 9 20 * *`, Europe/London) — On the 20th of each month at 09:00 UK,
-   it generates next month's calendar.
-2. **Calendar generation** — `GPT-4.1` plans 3 posts/week (Mon/Wed/Fri 09:00)
-   plus 2 blog outlines, rotating sectors and respecting the content mix
-   (40% sector promos, 20% awareness days, 20% hiring/workforce, 20% reviews/spotlights).
-3. **Image generation** — `gpt-image-1` produces a 1080×1080 PNG per post
-   using a heavily-structured brand prompt (dark navy background, sector tag,
-   bold headline, body copy, CTA button, curved gold/red wave separator,
-   contact strip with logo + phone + website + email).
-4. **Approval** — Each post is sent to your Telegram chat with inline buttons:
-   **Approve · Reject · Edit Caption**. Edit Caption supports plain new text
-   or `!ai <instruction>` to ask GPT to rewrite.
-5. **Scheduling** — Approved posts are scheduled on Zernio for their planned
-   date/time across the configured account IDs.
-6. **Persistence** — All posts, calendars and blog outlines are stored in
-   SQLite (`/app/data/agent.db`).
+1. **Calendar planning** — On `/generate` (or the monthly cron, default
+   `0 9 20 * *` Europe/London) `GPT-4.1` plans:
+   - **12 social posts** scheduled Mon / Wed / Fri at 09:00 UK across
+     the next 4 weeks.
+   - **2 blog posts** scheduled on dedicated Mon/Wed/Fri slots later in
+     the month and published as social-media promo posts (blog image +
+     promo caption + blog link).
+   - Content mix rotates across all 7 sectors (M&E, Construction,
+     Driving & Transport, Data Centres, Rail & Infrastructure, Fit-Out
+     & Interiors, Residential) and the main UK / international
+     awareness days.
+2. **Review** — The Telegram bot sends the full calendar as a numbered
+   list (1–14). Each entry shows the topic, scheduled date/time,
+   caption, hashtags, and a suggested image description.
+3. **Image collection** — You create each image in ChatGPT 5.5 and
+   send them to the bot. For every photo the bot asks "which post
+   number?" — reply with the number, or send the photo with the number
+   already in the caption ("3").
+4. **Scheduling** — `/schedule` pushes all 14 posts to Zernio for
+   their planned date/time across **Facebook, Instagram, LinkedIn,
+   Twitter/X and Google Business**. Blog promo posts include the blog
+   URL (set with `/seturl <post#> <url>`) appended to the caption.
+5. **Persistence** — Calendars, posts, blogs and Zernio post IDs are
+   stored in SQLite (`/app/data/agent.db`). User-uploaded images are
+   stored on disk under `/app/data/images/` and served at
+   `${PUBLIC_BASE_URL}/images/<file>` so Zernio can fetch them.
+
+---
+
+## Telegram commands
+
+| Command | What it does |
+|---|---|
+| `/generate` | Plan next month's calendar (12 social posts + 2 blog posts) and send it for review |
+| `/calendar` | Re-send the active calendar |
+| `/status`   | Show which posts already have an image and which still need one |
+| `/seturl <post#> <url>` | Set the blog URL for a blog promo post (replaces `<BLOG_URL>` in the caption) |
+| `/schedule` | Once every post has an image, schedule all 14 posts on Zernio |
+| `/reset`    | Wipe the active calendar and start over |
+| `/cancel`   | Cancel a pending image assignment |
+| `/help`     | Show the commands list |
+
+When you send a photo without a caption number, the bot replies with a
+numbered list of all 14 posts and asks which one the image is for.
+You can also reply to the bot's "which post?" question with any
+integer, or send the photo with the number already in the caption.
 
 ---
 
@@ -48,15 +79,14 @@ Zernio API   ─►  Facebook · Instagram · LinkedIn · Twitter/X · Google Bu
 ```
 src/
   config/
-    brand.js        — colours, sectors, schedule rules, contact strip
+    brand.js        — sectors, schedule rules, hashtag packs
     platforms.js    — internal-key → Zernio account-id mapping
-    prompts.js      — system + image prompts
+    prompts.js      — calendar generator + caption-edit prompts
     index.js        — env loader + barrel
   services/
     openaiClient.js — shared OpenAI SDK instance
-    calendar.js     — monthly calendar generation + orchestration
-    imageGen.js     — gpt-image-1 wrapper, saves PNG to /data/images
-    telegram.js     — approval workflow (sendPhoto + inline keyboard)
+    calendar.js     — monthly calendar generation (no image gen)
+    telegram.js     — review / upload / match / schedule workflow
     zernio.js       — REST wrapper, schedulePost()
   routes/
     status.js       — /health, /status, /posts/:monthKey, /blogs/:monthKey
@@ -66,8 +96,10 @@ src/
     storage.js      — SQLite (better-sqlite3) persistence
     logger.js       — pino logger
   index.js          — Express boot, cron, Telegram polling
-data/               — SQLite + generated images (mount as Railway volume)
-assets/logo.png     — Strong Group logo (reference)
+data/               — SQLite + user-uploaded images (Railway volume)
+assets/
+  logo.png          — Strong Group logo (reference for ChatGPT image briefs)
+  style-guide.md    — visual style guide Nick follows in ChatGPT 5.5
 Dockerfile
 railway.toml
 .env.example
@@ -79,9 +111,9 @@ railway.toml
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
-| `OPENAI_API_KEY` | yes | — | OpenAI key with access to `gpt-4.1` and `gpt-image-1` |
+| `OPENAI_API_KEY` | yes | — | OpenAI key with access to `gpt-4.1` |
 | `OPENAI_TEXT_MODEL` | no | `gpt-4.1` | |
-| `OPENAI_IMAGE_MODEL` | no | `gpt-image-1` | gpt-image-1 / chatgpt-image-latest |
+| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | |
 | `ZERNIO_API_KEY` | yes | — | Bearer token |
 | `ZERNIO_BASE_URL` | no | `https://zernio.com/api/v1` | |
 | `ZERNIO_ACCOUNT_FACEBOOK` | yes | `69c00c826cb7b8cf4c8e23d9` | |
@@ -90,14 +122,14 @@ railway.toml
 | `ZERNIO_ACCOUNT_LINKEDIN` | yes | `69c014136cb7b8cf4c8e3dd5` | |
 | `ZERNIO_ACCOUNT_TWITTER` | yes | `69c0143b6cb7b8cf4c8e3e69` | Twitter/X |
 | `TELEGRAM_BOT_TOKEN` | yes | — | From @BotFather |
-| `TELEGRAM_CHAT_ID` | yes | — | Nick's chat id (positive int for DM, negative for group) |
-| `CALENDAR_CRON` | no | `0 9 20 * *` | Standard cron, in `TZ` |
+| `TELEGRAM_CHAT_ID` | yes | — | Nick's Telegram chat ID |
+| `CALENDAR_CRON` | no | `0 9 20 * *` | Standard cron in `TZ` |
 | `CALENDAR_LOOKAHEAD_MONTHS` | no | `1` | Plan N months ahead |
 | `TZ` | no | `Europe/London` | |
-| `PUBLIC_BASE_URL` | yes (in prod) | `http://localhost:3000` | Used in image URLs sent to Zernio |
-| `DATA_DIR` | no | `./data` | Where SQLite + images live |
+| `PUBLIC_BASE_URL` | **yes (prod)** | `http://localhost:3000` | Used in image URLs sent to Zernio |
+| `DATA_DIR` | no | `./data` | Where SQLite + uploaded images live |
 | `DB_FILE` | no | `./data/agent.db` | |
-| `TRIGGER_SECRET` | no | — | If set, must be passed to manual trigger endpoints |
+| `TRIGGER_SECRET` | no | — | Required header / query param for `POST /generate-calendar` |
 | `LOG_LEVEL` | no | `info` | `trace`/`debug`/`info`/`warn`/`error` |
 | `PORT` | no | `3000` | |
 
@@ -130,39 +162,21 @@ curl -X POST "http://localhost:3000/generate-calendar"
 
 ---
 
-## Telegram approval flow
-
-1. Agent sends each post as a photo with the formatted caption and three
-   inline buttons: **Approve · Reject · Edit Caption**.
-2. **Approve** → schedules on Zernio for the planned date/time and edits
-   the message to show the Zernio post ID.
-3. **Reject** → marks the post `rejected` and skips it.
-4. **Edit Caption** → bot waits for your reply.
-   - Reply with plain text → that becomes the new caption.
-   - Reply with `!ai shorten and add a CTA` → GPT rewrites it on-brand.
-   - Reply with `/cancel` → abort.
-
-Bot commands (DM only):
-- `/status` — counts of posts by status
-- `/generate` — generate next month's calendar now
-- `/help` — list commands
-
----
-
-## Manual trigger endpoints
+## HTTP endpoints
 
 If `TRIGGER_SECRET` is set, pass it as `?secret=...` or in the
-`x-trigger-secret` header.
+`x-trigger-secret` header for the protected routes.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET`  | `/health` | Liveness |
+| `GET`  | `/health` | Liveness probe |
 | `GET`  | `/status` | Counts + last run timestamp |
 | `GET`  | `/posts/:monthKey` | List posts for a month (e.g. `2026-06`) |
-| `GET`  | `/blogs/:monthKey` | List blog outlines for a month |
-| `POST` | `/generate-calendar` | Generate next month now (`?lookahead=N` to override) |
+| `GET`  | `/blogs/:monthKey` | List blog records for a month |
+| `POST` | `/generate-calendar` | Generate next month's calendar (`?lookahead=N` to override) |
 | `GET`  | `/zernio/accounts` | Sanity check Zernio connection |
 | `POST` | `/telegram/test` | Send a test ping to your Telegram chat |
+| `GET`  | `/images/<file>` | User-uploaded images, served to Zernio |
 
 ---
 
@@ -171,17 +185,19 @@ If `TRIGGER_SECRET` is set, pass it as `?secret=...` or in the
 1. Push this repo to GitHub (`JHR-1/strong-marketing-agent`).
 2. In Railway → **New Project → Deploy from GitHub repo** and pick the repo.
 3. Railway will auto-detect `railway.toml` + `Dockerfile`.
-4. Add a **Volume** mounted at `/app/data` (persists SQLite + generated PNGs).
-5. Set environment variables (copy from `.env.example`, fill in real values).
-6. After first deploy, copy the Railway-assigned public URL and set:
+4. Add a **Volume** mounted at `/app/data` (persists SQLite + uploaded
+   images so they survive restarts and remain reachable for Zernio).
+5. Set environment variables (copy from `.env.example`).
+6. After first deploy, copy the Railway public URL and set:
    ```
-   PUBLIC_BASE_URL=https://<your-service>.up.railway.app
+   PUBLIC_BASE_URL=https://strong-marketing-agent-production.up.railway.app
    ```
-   This is critical — Zernio fetches the image from this URL when posting.
+   This is critical — Zernio fetches every image from this URL when
+   it publishes a post.
 7. Hit `https://<your-service>.up.railway.app/health` to confirm it's live.
 
-The cron (`0 9 20 * *` Europe/London) will fire on the 20th of every month.
-For an immediate test, hit `POST /generate-calendar` or send `/generate` to
+The cron (`0 9 20 * *` Europe/London) fires on the 20th of every month
+to plan the upcoming month. For an immediate test, send `/generate` to
 the Telegram bot.
 
 ---
@@ -192,13 +208,13 @@ the Telegram bot.
 - **Phone:** 0208 763 6122
 - **Website:** strong-group.co.uk
 - **Email:** info@strong-group.co.uk
-- **Sectors:** M&E · Construction · Driving/Transport · Fit-Out & Interiors · Data Centres · Rail · Commercial · Residential
-- **Visual style:** 1080×1350 portrait · dark navy gradient background · single topic-driven accent colour (gold / green / red / cyan / purple) · massive condensed uppercase headline with ONE key word in accent · pill badge top-left · photoreal editorial imagery · curved wave separator above the contact strip · full contact strip at bottom with the Strong Group logo, phone, website, email.
-
-The full visual rules and image prompt template live in
-`src/config/prompts.js`. The reference set (12 approved ChatGPT-5.5
-posters) is in `assets/reference/` and the human-readable style guide
-is at `assets/style-guide.md`.
+- **Sectors:** M&E · Construction · Driving & Transport · Data Centres · Rail & Infrastructure · Fit-Out & Interiors · Residential
+- **Image style:** Nick designs every graphic in ChatGPT 5.5 following
+  `assets/style-guide.md` — dark navy gradient background, single
+  topic-driven accent colour, massive condensed uppercase headline with
+  one accent key word, pill badge top-left, photoreal editorial
+  imagery, curved wave separator above the contact strip, and the
+  Strong Group contact strip at the bottom.
 
 ---
 

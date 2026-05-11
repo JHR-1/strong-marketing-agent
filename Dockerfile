@@ -18,7 +18,8 @@ RUN npm install --omit=dev --no-audit --no-fund \
 COPY src ./src
 COPY assets ./assets
 
-# Persistent data directory (Railway volume should be mounted here)
+# Persistent data directory (Railway volume should be mounted here).
+# /app/data/images stores user-uploaded images served at /images/* for Zernio.
 RUN mkdir -p /app/data/images
 ENV DATA_DIR=/app/data
 ENV DB_FILE=/app/data/agent.db

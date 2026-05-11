@@ -11,8 +11,8 @@ const env = {
   tz: process.env.TZ || 'Europe/London',
 
   openaiApiKey: process.env.OPENAI_API_KEY,
+  openaiBaseUrl: process.env.OPENAI_BASE_URL || '',
   openaiTextModel: process.env.OPENAI_TEXT_MODEL || 'gpt-4.1',
-  openaiImageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
 
   zernioApiKey: process.env.ZERNIO_API_KEY,
   zernioBaseUrl: process.env.ZERNIO_BASE_URL || 'https://zernio.com/api/v1',

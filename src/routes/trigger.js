@@ -1,5 +1,5 @@
 /**
- * Manual trigger endpoints (for testing).
+ * Manual / admin trigger endpoints.
  *
  * Protected by an optional `TRIGGER_SECRET` env var which must be sent
  * as `?secret=...` or in the `x-trigger-secret` header.
@@ -7,35 +7,39 @@
 
 const express = require('express');
 const { env } = require('../config');
-const calendar = require('../services/calendar');
-const imageGen = require('../services/imageGen');
 const zernio = require('../services/zernio');
 const logger = require('../utils/logger');
 
-function makeRouter({ telegram }) {
+function makeRouter({ telegram, calendar }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
     if (!env.triggerSecret) return next();
-    const provided =
-      req.query.secret || req.get('x-trigger-secret') || '';
+    const provided = req.query.secret || req.get('x-trigger-secret') || '';
     if (provided !== env.triggerSecret) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
     next();
   });
 
-  // Manually generate next month's calendar (or override with ?lookahead=N)
+  // Manually generate next month's calendar (or override with ?lookahead=N).
+  // Note: the agent no longer auto-generates images; this only plans the
+  // content. The user still needs to send images via Telegram and call
+  // /schedule (or POST /schedule-all here).
   router.post('/generate-calendar', async (req, res) => {
     const lookaheadMonths =
       parseInt(req.query.lookahead, 10) || env.calendarLookaheadMonths;
     res.json({ ok: true, accepted: true, lookaheadMonths });
     try {
-      await calendar.generateCalendarForUpcomingMonth({
-        lookaheadMonths,
-        imageGen,
-        telegram
+      const result = await calendar.generateCalendarForUpcomingMonth({
+        lookaheadMonths
       });
+      if (telegram) {
+        await telegram.sendInfo(
+          `📅 Next month's calendar (${result.monthName} ${result.year}) is ready.`
+        );
+        await telegram._sendCalendar(env.telegramChatId, result);
+      }
     } catch (err) {
       logger.error({ err: err.message }, 'manual generate-calendar failed');
       if (telegram) {
@@ -44,7 +48,7 @@ function makeRouter({ telegram }) {
     }
   });
 
-  // List Zernio accounts (sanity check)
+  // Sanity check Zernio connection
   router.get('/zernio/accounts', async (req, res) => {
     try {
       const data = await zernio.listAccounts();

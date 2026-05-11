@@ -1,8 +1,15 @@
 /**
  * Strong Recruitment Group — Marketing Agent
  *
- * Entry point: boots Express, starts the Telegram bot, and registers
- * the monthly cron job (default 09:00 on the 20th).
+ * Entry point. Boots:
+ *   - Express (health + status + manual triggers)
+ *   - The Telegram bot (polling)
+ *   - The monthly cron job (default 09:00 on the 20th, Europe/London)
+ *
+ * Workflow (high-level):
+ *   /generate (Telegram or cron) -> calendar planned (12 social + 2 blog)
+ *   user uploads images via Telegram, matches to post numbers
+ *   /schedule -> all posts scheduled on Zernio across 5 channels
  */
 
 require('dotenv').config();
@@ -16,7 +23,6 @@ const logger = require('./utils/logger');
 const storage = require('./utils/storage');
 
 const calendar = require('./services/calendar');
-const imageGen = require('./services/imageGen');
 const zernio = require('./services/zernio');
 const TelegramService = require('./services/telegram');
 
@@ -28,24 +34,24 @@ async function main() {
   storage.getDb();
 
   // Boot Telegram (polling)
-  const telegram = new TelegramService({ zernio });
+  const telegram = new TelegramService({ zernio, calendar });
   telegram.start();
 
   // Express
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  // Serve generated images so Zernio can fetch them via PUBLIC_BASE_URL
+  // Serve user-uploaded images so Zernio can fetch them.
   app.use(
     '/images',
     express.static(path.resolve(env.dataDir, 'images'), {
-      maxAge: '7d',
+      maxAge: '30d',
       fallthrough: true
     })
   );
 
   app.use('/', statusRoutes);
-  app.use('/', triggerRoutesFactory({ telegram }));
+  app.use('/', triggerRoutesFactory({ telegram, calendar }));
 
   app.get('/', (req, res) => {
     res.json({
@@ -69,19 +75,23 @@ async function main() {
     );
   });
 
-  // Cron: monthly calendar generation
+  // Cron: monthly calendar generation (planning only — user still
+  // needs to send images and run /schedule).
   if (cron.validate(env.calendarCron)) {
     cron.schedule(
       env.calendarCron,
       async () => {
         logger.info('Cron fired: generating next month calendar');
         try {
-          await calendar.generateCalendarForUpcomingMonth({
-            imageGen,
-            telegram
-          });
+          const result = await calendar.generateCalendarForUpcomingMonth();
           await telegram.sendInfo(
-            'Monthly content calendar generated. Approve each post above.'
+            `📅 Next month's calendar (${result.monthName} ${result.year}) is ready — sending it now.`
+          );
+          // Re-use the same render path the /calendar command uses.
+          await telegram._sendCalendar(env.telegramChatId, result);
+          await telegram.sendInfo(
+            'Create each image in ChatGPT 5.5 and send them here. ' +
+              'When all images are attached, run /schedule.'
           );
         } catch (err) {
           logger.error({ err: err.message }, 'cron generate failed');
