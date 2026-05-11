@@ -9,6 +9,7 @@ const express = require('express');
 const { env } = require('../config');
 const zernio = require('../services/zernio');
 const logger = require('../utils/logger');
+const storage = require('../utils/storage');
 
 function makeRouter({ telegram, calendar }) {
   const router = express.Router();
@@ -45,6 +46,39 @@ function makeRouter({ telegram, calendar }) {
       if (telegram) {
         await telegram.sendInfo(`Calendar generation failed: ${err.message}`);
       }
+    }
+  });
+
+  // Restore calendar data without re-running /generate.
+  // Body: { monthKey, posts[], blogs[] }
+  router.post('/seed-calendar', async (req, res) => {
+    try {
+      const { monthKey, posts = [], blogs = [] } = req.body;
+
+      if (!monthKey) {
+        return res.status(400).json({ ok: false, error: 'monthKey is required' });
+      }
+
+      const calendarId = storage.saveCalendar(monthKey, { monthKey, posts, blogs });
+
+      let postsInserted = 0;
+      for (const post of posts) {
+        storage.insertPost({ ...post, calendar_id: calendarId, month_key: monthKey });
+        postsInserted++;
+      }
+
+      let blogsInserted = 0;
+      for (const blog of blogs) {
+        storage.insertBlog({ ...blog, calendar_id: calendarId, month_key: monthKey });
+        blogsInserted++;
+      }
+
+      storage.setSetting('last_calendar_month', monthKey);
+
+      res.json({ ok: true, postsInserted, blogsInserted });
+    } catch (err) {
+      logger.error({ err: err.message }, 'seed-calendar failed');
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 
