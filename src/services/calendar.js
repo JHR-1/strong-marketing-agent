@@ -33,8 +33,36 @@ async function generateCalendarForUpcomingMonth({
   lookaheadMonths = env.calendarLookaheadMonths
 } = {}) {
   const now = DateTime.now().setZone(env.tz);
-  const { year, month, monthName } = dates.targetMonth(now, lookaheadMonths);
-  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+  // Smart month selection: start from today + lookaheadMonths, but if
+  // that month already has a completed/scheduled calendar, skip forward
+  // up to 3 months to find the next unplanned month.
+  let year, month, monthName, monthKey;
+  for (let offset = lookaheadMonths; offset <= lookaheadMonths + 3; offset++) {
+    const candidate = dates.targetMonth(now, offset);
+    const candidateKey = `${candidate.year}-${String(candidate.month).padStart(2, '0')}`;
+    const existing = await storage.getCalendar(candidateKey);
+    if (!existing || existing.status === 'awaiting_images') {
+      // No calendar yet, or one that was never completed — (re)generate it
+      year = candidate.year;
+      month = candidate.month;
+      monthName = candidate.monthName;
+      monthKey = candidateKey;
+      break;
+    }
+    logger.info(
+      { monthKey: candidateKey, status: existing.status },
+      'Month already has a calendar — skipping ahead'
+    );
+  }
+  if (!monthKey) {
+    // Fallback: just use the original target
+    const fallback = dates.targetMonth(now, lookaheadMonths);
+    year = fallback.year;
+    month = fallback.month;
+    monthName = fallback.monthName;
+    monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  }
 
   logger.info({ monthKey, monthName, year }, 'Generating monthly calendar');
 
