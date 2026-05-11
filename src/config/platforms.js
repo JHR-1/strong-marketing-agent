@@ -43,16 +43,52 @@ const PLATFORMS = Object.freeze({
 
 const ALL_PLATFORM_KEYS = Object.keys(PLATFORMS);
 
+const TWITTER_MAX_CHARS = 280;
+
+/**
+ * Build a Twitter-safe version of a caption (with hashtags) that fits
+ * within Twitter's 280-character limit.
+ *
+ * Mirrors the logic in the working schedule-zernio.py reference script:
+ *   - Truncate the caption body to 247 chars + "..." if it is over 250
+ *   - Append the first 3 hashtags
+ *   - Hard-cap the final string at 280 chars
+ *
+ * @param {string} captionBody  - the post body (without hashtags)
+ * @param {string[]} hashtags   - the full hashtag list for the post
+ * @returns {string}
+ */
+function buildTwitterCustomContent(captionBody = '', hashtags = []) {
+  let body = (captionBody || '').toString();
+  if (body.length > 250) {
+    body = body.slice(0, 247) + '...';
+  }
+  const firstThree = (hashtags || [])
+    .filter((h) => typeof h === 'string' && h.trim())
+    .slice(0, 3)
+    .join(' ');
+  let full = firstThree ? `${body}\n\n${firstThree}` : body;
+  if (full.length > TWITTER_MAX_CHARS) {
+    full = full.slice(0, TWITTER_MAX_CHARS);
+  }
+  return full;
+}
+
 /**
  * Resolve a list of platform keys to Zernio platform-objects.
  * Skips any platform whose accountId env var is missing and logs a warning.
  * Each object includes { platform, accountId, profileId } as required by
- * the Zernio POST /posts endpoint.
+ * the Zernio POST /posts endpoint. For the Twitter platform, an extra
+ * `customContent` field is added with a 280-char-safe variant of the
+ * caption + first 3 hashtags.
  *
  * @param {string[]} keys
- * @param {object} [logger]
+ * @param {object}  [logger]
+ * @param {object}  [opts]
+ * @param {string}  [opts.captionBody] - body text used to build Twitter customContent
+ * @param {string[]}[opts.hashtags]    - hashtag list used to build Twitter customContent
  */
-function toZernioPlatforms(keys, logger = console) {
+function toZernioPlatforms(keys, logger = console, opts = {}) {
   const out = [];
   for (const key of keys) {
     const p = PLATFORMS[key];
@@ -64,11 +100,18 @@ function toZernioPlatforms(keys, logger = console) {
       logger.warn(`Skipping ${p.label}: missing accountId env var`);
       continue;
     }
-    out.push({
+    const entry = {
       platform: p.zernioPlatform,
       accountId: p.accountId,
       profileId: PROFILE_ID
-    });
+    };
+    if (p.zernioPlatform === 'twitter') {
+      entry.customContent = buildTwitterCustomContent(
+        opts.captionBody,
+        opts.hashtags
+      );
+    }
+    out.push(entry);
   }
   return out;
 }
@@ -77,5 +120,7 @@ module.exports = {
   PLATFORMS,
   ALL_PLATFORM_KEYS,
   PROFILE_ID,
-  toZernioPlatforms
+  TWITTER_MAX_CHARS,
+  toZernioPlatforms,
+  buildTwitterCustomContent
 };

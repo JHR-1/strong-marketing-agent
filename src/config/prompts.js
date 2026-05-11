@@ -73,13 +73,24 @@ Always respond with valid JSON matching the schema you are given.
 No prose, no markdown — JSON only.
 `.trim();
 
-function buildCalendarUserPrompt({ year, monthName, awarenessDays, socialSlots, blogSlots }) {
+function buildCalendarUserPrompt({
+  year,
+  monthName,
+  awarenessDays,
+  socialSlots,
+  blogSlots,
+  history = []
+}) {
   const awarenessList = awarenessDays.length
     ? awarenessDays.map((d) => `- ${d.date}: ${d.name}`).join('\n')
     : '- (no major awareness days fall in this month — use sector promos instead)';
 
+  const historyBlock = buildHistoryBlock(history);
+
   return `
 Plan the social media + blog calendar for ${monthName} ${year}.
+
+${historyBlock}
 
 Available Mon/Wed/Fri 09:00 Europe/London slots for SOCIAL posts (use
 exactly these 12, in this order — one per slot):
@@ -134,7 +145,48 @@ Hard constraints:
 - Captions must be publish-ready, UK English, no placeholders.
 - For blogs, the promo caption MUST contain the literal token
   "<BLOG_URL>" exactly where the link should appear.
+- Do NOT repeat any of the past topics, hooks, angles, or captions
+  listed in the POST HISTORY section above. Every topic and caption
+  this month must be materially new (fresh angle, fresh wording,
+  fresh examples). If a sector has already been covered recently,
+  approach it from a different angle (e.g. a different role, a
+  different challenge, a different time of year, a different stat).
 `.trim();
+}
+
+/**
+ * Render the post history section that's injected into the user prompt.
+ * Kept compact so it does not blow up the context window — we list each
+ * past post as one line: `[YYYY-MM #n | sector | content_type] topic — caption snippet`.
+ */
+function buildHistoryBlock(history) {
+  if (!history || !history.length) {
+    return [
+      'POST HISTORY (previous months) — none yet.',
+      'This is the first generated calendar, so there is nothing to avoid repeating yet.',
+      ''
+    ].join('\n');
+  }
+
+  const lines = history.map((h) => {
+    const captionSnippet = (h.caption || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160);
+    const sector = h.sector || 'General';
+    const contentType = h.content_type || h.kind || 'social';
+    return `- [${h.month_key} #${h.post_number} | ${sector} | ${contentType}] ${
+      h.topic || '(no topic)'
+    }${captionSnippet ? ` — ${captionSnippet}${captionSnippet.length === 160 ? '…' : ''}` : ''}`;
+  });
+
+  return [
+    `POST HISTORY (previous months, ${history.length} entries) — DO NOT REPEAT any of these topics, hooks, angles, or captions:`,
+    ...lines,
+    '',
+    'When you generate this month\'s calendar, every topic and caption MUST be different from the items above. Do not paraphrase or lightly reword an earlier post — pick a new angle, a new role, a new sector challenge, a new awareness day, a new staff/client spotlight idea, etc.',
+    ''
+  ].join('\n');
 }
 
 // -------------------------------------------------------------------

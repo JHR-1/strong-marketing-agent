@@ -59,13 +59,25 @@ async function generateCalendarForUpcomingMonth({
     );
   }
 
+  // Pull every previously-generated post (excluding the month we're
+  // about to regenerate) so we can tell the LLM what NOT to repeat.
+  const history = storage.listPastPostsHistory({
+    excludeMonthKey: monthKey,
+    limit: 300
+  });
+  logger.info(
+    { monthKey, historyCount: history.length },
+    'Loaded post history for non-repetition prompt'
+  );
+
   const calendar = await callLlmForCalendar({
     year,
     month,
     monthName,
     awarenessDays,
     socialSlotIsos,
-    blogSlotIsos
+    blogSlotIsos,
+    history
   });
 
   // Wipe any previous attempt for this month so the user gets a clean
@@ -192,14 +204,16 @@ async function callLlmForCalendar({
   monthName,
   awarenessDays,
   socialSlotIsos,
-  blogSlotIsos
+  blogSlotIsos,
+  history = []
 }) {
   const userPrompt = PROMPTS.buildCalendarUserPrompt({
     year,
     monthName,
     awarenessDays,
     socialSlots: socialSlotIsos,
-    blogSlots: blogSlotIsos
+    blogSlots: blogSlotIsos,
+    history
   });
 
   const completion = await openai.chat.completions.create({

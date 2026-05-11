@@ -205,6 +205,46 @@ function deletePostsForMonth(monthKey) {
   d.prepare('DELETE FROM posts WHERE month_key = ?').run(monthKey);
 }
 
+/**
+ * Retrieve a compact history of every previously generated post
+ * (optionally excluding the given month). Used by the calendar
+ * generator to feed past topics / captions / sectors into the LLM
+ * so that next month's calendar does not repeat earlier content.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.excludeMonthKey] - month_key to exclude (e.g. the one we're regenerating)
+ * @param {number} [opts.limit=200]       - cap how many rows are returned (most recent first)
+ * @returns {Array<{month_key:string, post_number:number, kind:string, sector:string|null, content_type:string|null, topic:string|null, caption:string|null, hashtags:string[]}>}
+ */
+function listPastPostsHistory({ excludeMonthKey = null, limit = 200 } = {}) {
+  const d = getDb();
+  const params = [];
+  let where = '';
+  if (excludeMonthKey) {
+    where = 'WHERE month_key != ?';
+    params.push(excludeMonthKey);
+  }
+  const rows = d
+    .prepare(
+      `SELECT month_key, post_number, kind, sector, content_type, topic, caption, hashtags_json
+       FROM posts
+       ${where}
+       ORDER BY month_key DESC, post_number ASC
+       LIMIT ?`
+    )
+    .all(...params, limit);
+  return rows.map((row) => ({
+    month_key: row.month_key,
+    post_number: row.post_number,
+    kind: row.kind,
+    sector: row.sector,
+    content_type: row.content_type,
+    topic: row.topic,
+    caption: row.caption,
+    hashtags: row.hashtags_json ? JSON.parse(row.hashtags_json) : []
+  }));
+}
+
 function hydratePost(row) {
   return {
     ...row,
@@ -285,6 +325,7 @@ module.exports = {
   listPostsByStatus,
   countByStatus,
   deletePostsForMonth,
+  listPastPostsHistory,
   // blogs
   insertBlog,
   updateBlog,

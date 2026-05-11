@@ -136,6 +136,7 @@ function makeRouter({ telegram, calendar }) {
               ? p.platforms
               : BRAND.defaultPlatforms,
             imageUrl: p.image_url,
+            hashtags: p.hashtags || [],
             timezone: env.tz
           });
 
