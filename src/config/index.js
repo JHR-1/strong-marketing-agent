@@ -16,6 +16,7 @@ const env = {
 
   zernioApiKey: process.env.ZERNIO_API_KEY,
   zernioBaseUrl: process.env.ZERNIO_BASE_URL || 'https://zernio.com/api/v1',
+  zernioProfileId: process.env.ZERNIO_PROFILE_ID || '69c00b0b467c216082612e75',
 
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,

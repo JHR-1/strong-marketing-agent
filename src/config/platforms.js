@@ -6,6 +6,8 @@
 
 require('dotenv').config();
 
+const PROFILE_ID = process.env.ZERNIO_PROFILE_ID || '69c00b0b467c216082612e75';
+
 const PLATFORMS = Object.freeze({
   facebook: {
     key: 'facebook',
@@ -16,7 +18,7 @@ const PLATFORMS = Object.freeze({
   google: {
     key: 'google',
     label: 'Google Business',
-    zernioPlatform: 'google',
+    zernioPlatform: 'googlebusiness',
     accountId: process.env.ZERNIO_ACCOUNT_GOOGLE
   },
   instagram: {
@@ -44,6 +46,8 @@ const ALL_PLATFORM_KEYS = Object.keys(PLATFORMS);
 /**
  * Resolve a list of platform keys to Zernio platform-objects.
  * Skips any platform whose accountId env var is missing and logs a warning.
+ * Each object includes { platform, accountId, profileId } as required by
+ * the Zernio POST /posts endpoint.
  *
  * @param {string[]} keys
  * @param {object} [logger]
@@ -60,7 +64,11 @@ function toZernioPlatforms(keys, logger = console) {
       logger.warn(`Skipping ${p.label}: missing accountId env var`);
       continue;
     }
-    out.push({ platform: p.zernioPlatform, accountId: p.accountId });
+    out.push({
+      platform: p.zernioPlatform,
+      accountId: p.accountId,
+      profileId: PROFILE_ID
+    });
   }
   return out;
 }
@@ -68,5 +76,6 @@ function toZernioPlatforms(keys, logger = console) {
 module.exports = {
   PLATFORMS,
   ALL_PLATFORM_KEYS,
+  PROFILE_ID,
   toZernioPlatforms
 };
