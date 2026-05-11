@@ -220,7 +220,7 @@ class TelegramService {
   }
 
   async _cmdShowCalendar(msg) {
-    const monthKey = storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getSetting('last_calendar_month');
     if (!monthKey) {
       await this.bot.sendMessage(
         msg.chat.id,
@@ -228,9 +228,9 @@ class TelegramService {
       );
       return;
     }
-    const cal = storage.getCalendar(monthKey);
-    const posts = storage.listPostsByMonth(monthKey);
-    const blogs = storage.listBlogsByMonth(monthKey);
+    const cal = await storage.getCalendar(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey);
+    const blogs = await storage.listBlogsByMonth(monthKey);
     const monthName = cal?.raw?.month || monthKey;
     await this._sendCalendar(msg.chat.id, {
       monthKey,
@@ -241,12 +241,12 @@ class TelegramService {
   }
 
   async _cmdStatus(msg) {
-    const monthKey = storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getSetting('last_calendar_month');
     if (!monthKey) {
       await this.bot.sendMessage(msg.chat.id, 'No active calendar.');
       return;
     }
-    const posts = storage.listPostsByMonth(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey);
     if (!posts.length) {
       await this.bot.sendMessage(msg.chat.id, 'No posts found for the active calendar.');
       return;
@@ -283,7 +283,7 @@ class TelegramService {
   async _cmdSetUrl(msg, args) {
     const [postNumStr, url] = args;
     const postNum = parseInt(postNumStr, 10);
-    const monthKey = storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getSetting('last_calendar_month');
     if (!monthKey || !postNum || !url) {
       await this.bot.sendMessage(
         msg.chat.id,
@@ -292,7 +292,7 @@ class TelegramService {
       );
       return;
     }
-    const post = storage.getPostByNumber(monthKey, postNum);
+    const post = await storage.getPostByNumber(monthKey, postNum);
     if (!post) {
       await this.bot.sendMessage(msg.chat.id, `No post #${postNum} in the active calendar.`);
       return;
@@ -304,7 +304,7 @@ class TelegramService {
       );
       return;
     }
-    storage.updateBlog(post.blog_id, { url });
+    await storage.updateBlog(post.blog_id, { url });
     // Replace the <BLOG_URL> token in the caption preview (the
     // caption is persisted with the token; we substitute at schedule
     // time too, but we also persist the URL here so /calendar shows it).
@@ -316,12 +316,12 @@ class TelegramService {
   }
 
   async _cmdSchedule(msg) {
-    const monthKey = storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getSetting('last_calendar_month');
     if (!monthKey) {
       await this.bot.sendMessage(msg.chat.id, 'No active calendar to schedule.');
       return;
     }
-    const posts = storage.listPostsByMonth(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey);
     const missing = posts.filter((p) => !p.image_url);
     if (missing.length) {
       await this.bot.sendMessage(
@@ -338,7 +338,7 @@ class TelegramService {
       `Scheduling ${posts.length} posts across Facebook, Instagram, LinkedIn, Twitter/X and Google Business…`
     );
 
-    const blogs = storage.listBlogsByMonth(monthKey);
+    const blogs = await storage.listBlogsByMonth(monthKey);
     const blogsById = new Map(blogs.map((b) => [b.id, b]));
 
     let okCount = 0;
@@ -349,7 +349,7 @@ class TelegramService {
         continue;
       }
       try {
-        storage.updatePost(p.id, { status: 'scheduling', schedule_error: null });
+        await storage.updatePost(p.id, { status: 'scheduling', schedule_error: null });
 
         const caption = this._buildCaptionForZernio(p, blogsById);
         const result = await this.zernio.schedulePost({
@@ -364,7 +364,7 @@ class TelegramService {
         });
         const zernioId =
           result?.id || result?.postId || result?.data?.id || null;
-        storage.updatePost(p.id, {
+        await storage.updatePost(p.id, {
           status: 'scheduled',
           zernio_post_id: zernioId
         });
@@ -374,7 +374,7 @@ class TelegramService {
           { err: err.message, postNumber: p.post_number },
           'Schedule failed for post'
         );
-        storage.updatePost(p.id, {
+        await storage.updatePost(p.id, {
           status: 'schedule_failed',
           schedule_error: err.message
         });
@@ -383,7 +383,7 @@ class TelegramService {
     }
 
     if (!failures.length) {
-      storage.updateCalendarStatus(monthKey, 'scheduled');
+      await storage.updateCalendarStatus(monthKey, 'scheduled');
       await this.bot.sendMessage(
         msg.chat.id,
         `All ${okCount} posts scheduled successfully on Zernio across all 5 channels.`
@@ -402,14 +402,14 @@ class TelegramService {
   }
 
   async _cmdReset(msg) {
-    const monthKey = storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getSetting('last_calendar_month');
     if (!monthKey) {
       await this.bot.sendMessage(msg.chat.id, 'Nothing to reset.');
       return;
     }
-    storage.deletePostsForMonth(monthKey);
-    storage.deleteBlogsForMonth(monthKey);
-    storage.setSetting('last_calendar_month', '');
+    await storage.deletePostsForMonth(monthKey);
+    await storage.deleteBlogsForMonth(monthKey);
+    await storage.setSetting('last_calendar_month', '');
     const state = getState(msg.chat.id);
     state.awaitingImageForPost = null;
     state.pendingImage = null;
@@ -440,8 +440,8 @@ class TelegramService {
     state.pendingImage = saved;
     state.awaitingImageForPost = null;
 
-    const monthKey = storage.getSetting('last_calendar_month');
-    const posts = monthKey ? storage.listPostsByMonth(monthKey) : [];
+    const monthKey = await storage.getSetting('last_calendar_month');
+    const posts = monthKey ? await storage.listPostsByMonth(monthKey) : [];
     const list = posts.length
       ? '\n\n' +
         posts
@@ -503,7 +503,7 @@ class TelegramService {
 
     // Caption editing
     if (state.editingPostId) {
-      const post = storage.getPost(state.editingPostId);
+      const post = await storage.getPost(state.editingPostId);
       state.editingPostId = null;
       if (!post) return;
       let newCaption = text;
@@ -524,7 +524,7 @@ class TelegramService {
           return;
         }
       }
-      storage.updatePost(post.id, { caption: newCaption });
+      await storage.updatePost(post.id, { caption: newCaption });
       await this.bot.sendMessage(
         msg.chat.id,
         `Caption updated for post #${post.post_number}.`
@@ -563,12 +563,12 @@ class TelegramService {
   }
 
   async _assignImageToPost(chatId, postNumber, saved) {
-    const monthKey = storage.getSetting('last_calendar_month');
+    const monthKey = await storage.getSetting('last_calendar_month');
     if (!monthKey) {
       await this.bot.sendMessage(chatId, 'No active calendar.');
       return;
     }
-    const post = storage.getPostByNumber(monthKey, postNumber);
+    const post = await storage.getPostByNumber(monthKey, postNumber);
     if (!post) {
       await this.bot.sendMessage(
         chatId,
@@ -576,7 +576,7 @@ class TelegramService {
       );
       return;
     }
-    storage.updatePost(post.id, {
+    await storage.updatePost(post.id, {
       image_path: saved.filePath,
       image_url: saved.publicUrl,
       image_telegram_file_id: saved.fileId,
@@ -584,7 +584,7 @@ class TelegramService {
     });
 
     // Summary
-    const posts = storage.listPostsByMonth(monthKey);
+    const posts = await storage.listPostsByMonth(monthKey);
     const missing = posts.filter((p) => !p.image_url).map((p) => p.post_number);
     const done = posts.length - missing.length;
 

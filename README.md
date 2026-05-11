@@ -48,9 +48,11 @@ ChatGPT 5.5 following the in-house style guide
    Twitter/X and Google Business**. Blog promo posts include the blog
    URL (set with `/seturl <post#> <url>`) appended to the caption.
 5. **Persistence** — Calendars, posts, blogs and Zernio post IDs are
-   stored in SQLite (`/app/data/agent.db`). User-uploaded images are
-   stored on disk under `/app/data/images/` and served at
-   `${PUBLIC_BASE_URL}/images/<file>` so Zernio can fetch them.
+   stored in **Supabase** (Postgres) via the `@supabase/supabase-js`
+   client, so post history survives container restarts and Railway
+   redeploys. User-uploaded images are still stored on disk under
+   `/app/data/images/` and served at `${PUBLIC_BASE_URL}/images/<file>`
+   so Zernio can fetch them. The schema lives in `sql/schema.sql`.
 
 ---
 
@@ -93,10 +95,12 @@ src/
     trigger.js      — POST /generate-calendar (manual), Zernio + Telegram tests
   utils/
     dates.js        — UK awareness-day lookup, Mon/Wed/Fri slot generator
-    storage.js      — SQLite (better-sqlite3) persistence
+    storage.js      — Supabase (Postgres) persistence — async API
     logger.js       — pino logger
   index.js          — Express boot, cron, Telegram polling
-data/               — SQLite + user-uploaded images (Railway volume)
+sql/
+  schema.sql        — Run once in the Supabase SQL editor
+data/               — User-uploaded images (Railway volume; no DB files)
 assets/
   logo.png          — Strong Group logo (reference for ChatGPT image briefs)
   style-guide.md    — visual style guide Nick follows in ChatGPT 5.5
@@ -127,8 +131,9 @@ railway.toml
 | `CALENDAR_LOOKAHEAD_MONTHS` | no | `1` | Plan N months ahead |
 | `TZ` | no | `Europe/London` | |
 | `PUBLIC_BASE_URL` | **yes (prod)** | `http://localhost:3000` | Used in image URLs sent to Zernio |
-| `DATA_DIR` | no | `./data` | Where SQLite + uploaded images live |
-| `DB_FILE` | no | `./data/agent.db` | |
+| `DATA_DIR` | no | `./data` | Where uploaded images live (mount a Railway volume here) |
+| `SUPABASE_URL` | yes | — | e.g. `https://xxxx.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | yes | — | Service role key (server-side only — never the anon key) |
 | `TRIGGER_SECRET` | no | — | Required header / query param for `POST /generate-calendar` |
 | `LOG_LEVEL` | no | `info` | `trace`/`debug`/`info`/`warn`/`error` |
 | `PORT` | no | `3000` | |
@@ -185,16 +190,20 @@ If `TRIGGER_SECRET` is set, pass it as `?secret=...` or in the
 1. Push this repo to GitHub (`JHR-1/strong-marketing-agent`).
 2. In Railway → **New Project → Deploy from GitHub repo** and pick the repo.
 3. Railway will auto-detect `railway.toml` + `Dockerfile`.
-4. Add a **Volume** mounted at `/app/data` (persists SQLite + uploaded
-   images so they survive restarts and remain reachable for Zernio).
-5. Set environment variables (copy from `.env.example`).
-6. After first deploy, copy the Railway public URL and set:
+4. Create a Supabase project and run `sql/schema.sql` in the SQL
+   editor. Grab the **Project URL** and the **service role key** from
+   *Project Settings → API*.
+5. Add a **Volume** mounted at `/app/data` so user-uploaded images
+   survive restarts and remain reachable for Zernio.
+6. Set environment variables (copy from `.env.example`), including
+   `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`.
+7. After first deploy, copy the Railway public URL and set:
    ```
    PUBLIC_BASE_URL=https://strong-marketing-agent-production.up.railway.app
    ```
    This is critical — Zernio fetches every image from this URL when
    it publishes a post.
-7. Hit `https://<your-service>.up.railway.app/health` to confirm it's live.
+8. Hit `https://<your-service>.up.railway.app/health` to confirm it's live.
 
 The cron (`0 9 20 * *` Europe/London) fires on the 20th of every month
 to plan the upcoming month. For an immediate test, send `/generate` to

@@ -58,24 +58,24 @@ function makeRouter({ telegram, calendar }) {
       }
 
       // Delete existing data for this month first
-      storage.deletePostsForMonth(monthKey);
-      storage.deleteBlogsForMonth(monthKey);
+      await storage.deletePostsForMonth(monthKey);
+      await storage.deleteBlogsForMonth(monthKey);
 
-      const calendarId = storage.saveCalendar(monthKey, { monthKey, posts, blogs });
+      const calendarId = await storage.saveCalendar(monthKey, { monthKey, posts, blogs });
 
       let postsInserted = 0;
       for (const post of posts) {
-        storage.insertPost({ ...post, calendar_id: calendarId, month_key: monthKey });
+        await storage.insertPost({ ...post, calendar_id: calendarId, month_key: monthKey });
         postsInserted++;
       }
 
       let blogsInserted = 0;
       for (const blog of blogs) {
-        storage.insertBlog({ ...blog, calendar_id: calendarId, month_key: monthKey });
+        await storage.insertBlog({ ...blog, calendar_id: calendarId, month_key: monthKey });
         blogsInserted++;
       }
 
-      storage.setSetting('last_calendar_month', monthKey);
+      await storage.setSetting('last_calendar_month', monthKey);
 
       res.json({ ok: true, calendarId, postsInserted, blogsInserted });
     } catch (err) {
@@ -88,12 +88,12 @@ function makeRouter({ telegram, calendar }) {
   // POST /schedule-all
   router.post('/schedule-all', async (req, res) => {
     try {
-      const monthKey = storage.getSetting('last_calendar_month');
+      const monthKey = await storage.getSetting('last_calendar_month');
       if (!monthKey) {
         return res.status(400).json({ ok: false, error: 'No active calendar' });
       }
 
-      const posts = storage.listPostsByMonth(monthKey);
+      const posts = await storage.listPostsByMonth(monthKey);
       const missing = posts.filter((p) => !p.image_url);
       if (missing.length) {
         return res.status(400).json({
@@ -102,7 +102,7 @@ function makeRouter({ telegram, calendar }) {
         });
       }
 
-      const blogs = storage.listBlogsByMonth(monthKey);
+      const blogs = await storage.listBlogsByMonth(monthKey);
       const blogsById = new Map(blogs.map((b) => [b.id, b]));
 
       let okCount = 0;
@@ -114,7 +114,7 @@ function makeRouter({ telegram, calendar }) {
           continue;
         }
         try {
-          storage.updatePost(p.id, { status: 'scheduling', schedule_error: null });
+          await storage.updatePost(p.id, { status: 'scheduling', schedule_error: null });
 
           // Build caption
           let body = p.caption || '';
@@ -142,7 +142,7 @@ function makeRouter({ telegram, calendar }) {
 
           const zernioId =
             result?.id || result?.postId || result?.data?.id || null;
-          storage.updatePost(p.id, {
+          await storage.updatePost(p.id, {
             status: 'scheduled',
             zernio_post_id: zernioId
           });
@@ -152,7 +152,7 @@ function makeRouter({ telegram, calendar }) {
             { err: err.message, postNumber: p.post_number },
             'Schedule failed for post'
           );
-          storage.updatePost(p.id, {
+          await storage.updatePost(p.id, {
             status: 'schedule_failed',
             schedule_error: err.message
           });
@@ -161,7 +161,7 @@ function makeRouter({ telegram, calendar }) {
       }
 
       if (!failures.length) {
-        storage.updateCalendarStatus(monthKey, 'scheduled');
+        await storage.updateCalendarStatus(monthKey, 'scheduled');
         res.json({ ok: true, scheduled: okCount, total: posts.length });
       } else {
         res.json({

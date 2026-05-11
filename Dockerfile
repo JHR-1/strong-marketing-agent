@@ -1,16 +1,17 @@
 # syntax=docker/dockerfile:1.7
 FROM node:20-bookworm-slim AS base
 
-# better-sqlite3 needs Python and a C++ toolchain to build native bindings
+# Persistence is now Supabase (Postgres) — no native modules to compile.
+# We still need `curl` for the healthcheck and `ca-certificates` for HTTPS.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 make g++ ca-certificates curl \
+      ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Install dependencies first for better caching
-COPY package.json ./
+COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --no-audit --no-fund \
  && npm cache clean --force
 
@@ -18,11 +19,11 @@ RUN npm install --omit=dev --no-audit --no-fund \
 COPY src ./src
 COPY assets ./assets
 
-# Persistent data directory (Railway volume should be mounted here).
-# /app/data/images stores user-uploaded images served at /images/* for Zernio.
+# /app/data/images stores user-uploaded Telegram images served at
+# /images/* so Zernio can fetch them. Mount a persistent Railway
+# volume at /app/data so images survive deploys.
 RUN mkdir -p /app/data/images
 ENV DATA_DIR=/app/data
-ENV DB_FILE=/app/data/agent.db
 ENV NODE_ENV=production
 ENV TZ=Europe/London
 ENV PORT=3000

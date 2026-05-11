@@ -30,8 +30,8 @@ const statusRoutes = require('./routes/status');
 const triggerRoutesFactory = require('./routes/trigger');
 
 async function main() {
-  // Init DB eagerly (creates tables if needed)
-  storage.getDb();
+  // Probe Supabase connectivity early so misconfiguration fails fast.
+  await storage.getDb();
 
   // Boot Telegram (polling)
   const telegram = new TelegramService({ zernio, calendar });

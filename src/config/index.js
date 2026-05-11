@@ -28,7 +28,11 @@ const env = {
   ),
 
   dataDir: process.env.DATA_DIR || './data',
-  dbFile: process.env.DB_FILE || './data/agent.db',
+
+  // Supabase (replaces the previous SQLite store).
+  // Use the SERVICE ROLE key — this app is server-side only.
+  supabaseUrl: process.env.SUPABASE_URL || '',
+  supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY || '',
 
   publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://localhost:3000',
   triggerSecret: process.env.TRIGGER_SECRET || ''

@@ -2,8 +2,6 @@ node_modules/
 .env
 .env.local
 .env.*.local
-data/*.db
-data/*.db-journal
 data/images/
 data/cache/
 npm-debug.log*

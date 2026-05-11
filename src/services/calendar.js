@@ -61,7 +61,7 @@ async function generateCalendarForUpcomingMonth({
 
   // Pull every previously-generated post (excluding the month we're
   // about to regenerate) so we can tell the LLM what NOT to repeat.
-  const history = storage.listPastPostsHistory({
+  const history = await storage.listPastPostsHistory({
     excludeMonthKey: monthKey,
     limit: 300
   });
@@ -82,10 +82,10 @@ async function generateCalendarForUpcomingMonth({
 
   // Wipe any previous attempt for this month so the user gets a clean
   // calendar to review.
-  storage.deletePostsForMonth(monthKey);
-  storage.deleteBlogsForMonth(monthKey);
+  await storage.deletePostsForMonth(monthKey);
+  await storage.deleteBlogsForMonth(monthKey);
 
-  const calendarId = storage.saveCalendar(
+  const calendarId = await storage.saveCalendar(
     monthKey,
     calendar,
     'awaiting_images'
@@ -93,10 +93,11 @@ async function generateCalendarForUpcomingMonth({
 
   // ---- 12 social posts ----
   const socialPosts = (calendar.social_posts || []).slice(0, SOCIAL_POST_COUNT);
-  socialPosts.forEach((p, i) => {
+  for (let i = 0; i < socialPosts.length; i++) {
+    const p = socialPosts[i];
     const slotIso = socialSlotIsos[i] || p.scheduled_for;
     const id = randomUUID();
-    storage.insertPost({
+    await storage.insertPost({
       id,
       calendar_id: calendarId,
       month_key: monthKey,
@@ -112,12 +113,13 @@ async function generateCalendarForUpcomingMonth({
       image_description: p.image_description || '',
       platforms: BRAND.defaultPlatforms
     });
-  });
+  }
 
   // ---- 2 blogs + their promo posts ----
   const blogPosts = (calendar.blog_posts || []).slice(0, BLOG_POST_COUNT);
-  blogPosts.forEach((b, i) => {
-    const blogId = storage.insertBlog({
+  for (let i = 0; i < blogPosts.length; i++) {
+    const b = blogPosts[i];
+    const blogId = await storage.insertBlog({
       calendar_id: calendarId,
       month_key: monthKey,
       topic: b.topic || '',
@@ -127,7 +129,7 @@ async function generateCalendarForUpcomingMonth({
 
     const slotIso = blogSlotIsos[i] || b.scheduled_for;
     const id = randomUUID();
-    storage.insertPost({
+    await storage.insertPost({
       id,
       calendar_id: calendarId,
       month_key: monthKey,
@@ -143,13 +145,13 @@ async function generateCalendarForUpcomingMonth({
       image_description: b.image_description || '',
       platforms: BRAND.defaultPlatforms
     });
-  });
+  }
 
-  storage.setSetting('last_calendar_run_at', new Date().toISOString());
-  storage.setSetting('last_calendar_month', monthKey);
+  await storage.setSetting('last_calendar_run_at', new Date().toISOString());
+  await storage.setSetting('last_calendar_month', monthKey);
 
-  const posts = storage.listPostsByMonth(monthKey);
-  const blogs = storage.listBlogsByMonth(monthKey);
+  const posts = await storage.listPostsByMonth(monthKey);
+  const blogs = await storage.listBlogsByMonth(monthKey);
 
   return { monthKey, monthName, year, posts, blogs };
 }
