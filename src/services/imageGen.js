@@ -24,10 +24,13 @@ fs.mkdirSync(IMAGE_DIR, { recursive: true });
 async function generatePostImage(post) {
   const prompt = PROMPTS.buildImagePrompt(post);
 
+  // gpt-image-1 supports 1024x1024, 1024x1536 (portrait), and 1536x1024 (landscape).
+  // We use the portrait size (4:5 / closest available) to match Nick's reference style.
   const result = await openai.images.generate({
     model: env.openaiImageModel,
     prompt,
-    size: '1024x1024',          // gpt-image-1 supports 1024x1024 (square)
+    size: '1024x1536',
+    quality: 'high',
     n: 1
   });
 

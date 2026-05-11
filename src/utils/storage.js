@@ -43,10 +43,15 @@ function initSchema(d) {
       scheduled_for   TEXT NOT NULL,
       sector          TEXT,
       content_type    TEXT,
+      badge_label     TEXT,
       headline        TEXT,
+      headline_key_word TEXT,
       body_copy       TEXT,
+      body_emphasis_phrase TEXT,
       cta             TEXT,
       caption         TEXT,
+      caption_quote   TEXT,
+      attribution     TEXT,
       platforms_json  TEXT,
       image_concept   TEXT,
       image_path      TEXT,
@@ -106,15 +111,22 @@ function insertPost(post) {
   const stmt = d.prepare(`
     INSERT INTO posts (
       id, calendar_id, month_key, scheduled_for, sector, content_type,
-      headline, body_copy, cta, caption, platforms_json, image_concept,
-      status
+      badge_label, headline, headline_key_word, body_copy,
+      body_emphasis_phrase, cta, caption, caption_quote, attribution,
+      platforms_json, image_concept, status
     ) VALUES (
       @id, @calendar_id, @month_key, @scheduled_for, @sector, @content_type,
-      @headline, @body_copy, @cta, @caption, @platforms_json, @image_concept,
-      'draft'
+      @badge_label, @headline, @headline_key_word, @body_copy,
+      @body_emphasis_phrase, @cta, @caption, @caption_quote, @attribution,
+      @platforms_json, @image_concept, 'draft'
     )
   `);
   stmt.run({
+    badge_label: null,
+    headline_key_word: null,
+    body_emphasis_phrase: null,
+    caption_quote: null,
+    attribution: null,
     ...post,
     platforms_json: JSON.stringify(post.platforms || [])
   });

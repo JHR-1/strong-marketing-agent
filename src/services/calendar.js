@@ -53,10 +53,15 @@ async function generateCalendarForUpcomingMonth({
       scheduled_for: p.scheduled_for,
       sector: p.sector,
       content_type: p.content_type,
+      badge_label: p.badge_label,
       headline: p.headline,
+      headline_key_word: p.headline_key_word,
       body_copy: p.body_copy,
+      body_emphasis_phrase: p.body_emphasis_phrase,
       cta: p.cta,
       caption: p.caption,
+      caption_quote: p.caption_quote,
+      attribution: p.attribution,
       platforms: p.platforms,
       image_concept: p.image_concept
     });
@@ -177,14 +182,19 @@ function normalisePostsToSlots(llmPosts, slots) {
       time: slot.toFormat('HH:mm'),
       sector: p.sector || 'General',
       content_type: p.content_type || 'sector_promo',
+      badge_label: p.badge_label || (p.sector || 'STRONG GROUP'),
       headline: (p.headline || '').toUpperCase().slice(0, 80),
+      headline_key_word: (p.headline_key_word || '').toUpperCase(),
       body_copy: p.body_copy || '',
+      body_emphasis_phrase: p.body_emphasis_phrase || '',
       cta: p.cta || 'Contact us today',
       caption: p.caption || '',
       platforms: Array.isArray(p.platforms) && p.platforms.length
         ? p.platforms
         : BRAND.defaultPlatforms,
-      image_concept: p.image_concept || ''
+      image_concept: p.image_concept || '',
+      attribution: p.attribution || '',
+      caption_quote: p.caption_quote || ''
     });
   }
   return out;

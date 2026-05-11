@@ -81,7 +81,7 @@ railway.toml
 |---|---|---|---|
 | `OPENAI_API_KEY` | yes | — | OpenAI key with access to `gpt-4.1` and `gpt-image-1` |
 | `OPENAI_TEXT_MODEL` | no | `gpt-4.1` | |
-| `OPENAI_IMAGE_MODEL` | no | `gpt-image-1` | |
+| `OPENAI_IMAGE_MODEL` | no | `gpt-image-1` | gpt-image-1 / chatgpt-image-latest |
 | `ZERNIO_API_KEY` | yes | — | Bearer token |
 | `ZERNIO_BASE_URL` | no | `https://zernio.com/api/v1` | |
 | `ZERNIO_ACCOUNT_FACEBOOK` | yes | `69c00c826cb7b8cf4c8e23d9` | |
@@ -193,10 +193,12 @@ the Telegram bot.
 - **Website:** strong-group.co.uk
 - **Email:** info@strong-group.co.uk
 - **Sectors:** M&E · Construction · Driving/Transport · Fit-Out & Interiors · Data Centres · Rail · Commercial · Residential
-- **Visual style:** Dark navy background · gold/orange + red accents · bold uppercase headlines · curved wave separator · contact strip with logo bottom-left
+- **Visual style:** 1080×1350 portrait · dark navy gradient background · single topic-driven accent colour (gold / green / red / cyan / purple) · massive condensed uppercase headline with ONE key word in accent · pill badge top-left · photoreal editorial imagery · curved wave separator above the contact strip · full contact strip at bottom with the Strong Group logo, phone, website, email.
 
 The full visual rules and image prompt template live in
-`src/config/prompts.js` — edit there to tune the look and feel.
+`src/config/prompts.js`. The reference set (12 approved ChatGPT-5.5
+posters) is in `assets/reference/` and the human-readable style guide
+is at `assets/style-guide.md`.
 
 ---
 
